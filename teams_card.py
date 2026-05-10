@@ -29,6 +29,16 @@ SEVERITY_STYLE = {
 }
 
 
+def _store_name(store: str, site: str | None) -> str:
+    """Compose the human-readable store_name shown at top-level in the
+    card payload. Uses whatever the LLM put in `site` verbatim (it may
+    already include state/region like 'Portland, OR'); if site is empty
+    the name falls back to just the store number."""
+    if site:
+        return f"Store {store} - {site}"
+    return f"Store {store}"
+
+
 def _iso_for_template(ts: Any) -> str:
     """Format a timestamp the way Teams {{DATE()}} / {{TIME()}} expects:
     ISO 8601 in UTC with Z suffix, no fractional seconds. Teams rejects
@@ -139,12 +149,15 @@ def build_card(report: dict[str, Any], splunk_base: str, meraki_base: str) -> di
             "items": items,
         })
 
+    store = report.get("store", "")
     return {
         "type": "AdaptiveCard",
         "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
         "version": "1.5",
+        "store_id": store,
+        "store_name": _store_name(store, report.get("site")),
         "body": body,
-        "actions": _actions(report.get("store", ""), splunk_base, meraki_base),
+        "actions": _actions(store, splunk_base, meraki_base),
     }
 
 
@@ -194,6 +207,8 @@ def build_recovery_card(
         "type": "AdaptiveCard",
         "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
         "version": "1.5",
+        "store_id": store,
+        "store_name": _store_name(store, recovery.get("site")),
         "body": body,
         "actions": _actions(store, splunk_base, meraki_base),
     }
