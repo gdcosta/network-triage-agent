@@ -1,0 +1,26 @@
+# Secrets — must NEVER be committed
+.env
+
+# Customer-specific system prompt; copy SOUL.md.example to SOUL.md and edit.
+SOUL.md
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Virtual environments
+.venv/
+venv/
+env/
+path/to/venv/
+
+# OS / IDE
+.DS_Store
+.idea/
+.vscode/
+.claude/
+
+# Logs / scratch
+*.log
+post-clear.log
