@@ -9,6 +9,11 @@ NETWORK_ID_RE = re.compile(r"N_KL0+(\d{1,3})$", re.IGNORECASE)
 ISE_DEVICE_RE = re.compile(r"KL-(\d{1,3})-", re.IGNORECASE)
 TE_AGENT_RE = re.compile(r"kl-te-[a-z]+-(\d{1,3})\.", re.IGNORECASE)
 
+# Pulls the city/site abbreviation out of an SD-WAN hostname like
+# `kl-112-van-rtr-1` → `VAN`. The 3rd hyphen-separated token is the
+# city per Kinetic Leisure's hostname convention.
+CITY_FROM_HOSTNAME_RE = re.compile(r"^kl-\d+-([a-z]+)-", re.IGNORECASE)
+
 
 def _norm(n: str | None) -> str | None:
     if not n:
@@ -42,6 +47,17 @@ def store_from_te_agent(agent: str | None) -> str | None:
         return None
     m = TE_AGENT_RE.search(agent)
     return _norm(m.group(1)) if m else None
+
+
+def city_from_hostname(hostname: str | None) -> str | None:
+    """Extract the city abbreviation from an SD-WAN hostname,
+    upper-cased so it reads like an airport-style code regardless of
+    how the source happens to capitalize it. Returns None if the
+    hostname doesn't match the convention."""
+    if not hostname:
+        return None
+    m = CITY_FROM_HOSTNAME_RE.search(hostname)
+    return m.group(1).upper() if m else None
 
 
 def hostname_pattern(store: str) -> str:

@@ -39,11 +39,24 @@ from correlation import run_drills
 from llm_client import LLMClient
 from splunk_client import SplunkClient
 from state import AlertState
+from store import city_from_hostname, store_from_hostname
 from teams_card import build_card, build_recovery_card, post_card
 
 log = logging.getLogger("triage")
 
 Poster = Callable[[str, dict], Awaitable[None]]
+
+
+def _city_from_scans(store: str, scan_data: dict[str, list[dict]]) -> str | None:
+    """Return the city abbreviation for `store` derived deterministically
+    from log data — no LLM inference. Pulls from the SD-WAN scan rows
+    where each store has a `vdevice-host-name` like `kl-112-van-rtr-1`.
+    Returns None if the store has no SD-WAN data this cycle."""
+    for row in scan_data.get("sdwan", []):
+        host = row.get("hostname") or ""
+        if store_from_hostname(host) == store:
+            return city_from_hostname(host)
+    return None
 
 
 async def _mock_poster(_url: str, card: dict) -> None:
@@ -100,7 +113,7 @@ async def poll_once(
     # 3. Recovery cards
     if decision.recovery_stores:
         await asyncio.gather(*[
-            _send_recovery(rec, state, cfg, poster)
+            _send_recovery(rec, state, cfg, poster, scan_data)
             for rec in decision.recovery_stores
         ], return_exceptions=True)
 
@@ -143,6 +156,11 @@ async def poll_once(
             continue
         if report.get("dedup_decision") != "send":
             continue
+        # Override LLM-supplied site with the literal value from logs
+        # so store_name is deterministic, not inferred.
+        log_city = _city_from_scans(report.get("store", ""), scan_data)
+        if log_city:
+            report["site"] = log_city
         try:
             card = build_card(
             report, cfg.splunk_base_url, cfg.meraki_base_url, cfg.store_names,
@@ -191,6 +209,7 @@ async def _run_all_drills(splunk, correlate_stores: list[dict], cfg: Config) -> 
 
 async def _send_recovery(
     rec: dict, state: AlertState, cfg: Config, poster: Poster,
+    scan_data: dict[str, list[dict]] | None = None,
 ) -> None:
     store = rec.get("store", "")
     prev = state.clear(store)
@@ -199,6 +218,9 @@ async def _send_recovery(
         duration_min = (datetime.now(timezone.utc) - prev.first_seen).total_seconds() / 60.0
     payload = {**rec, "duration_minutes": duration_min,
                "timestamp": datetime.now(timezone.utc).isoformat()}
+    log_city = _city_from_scans(store, scan_data or {})
+    if log_city:
+        payload["site"] = log_city
     try:
         card = build_recovery_card(
             payload, cfg.splunk_base_url, cfg.meraki_base_url, cfg.store_names,
