@@ -4,6 +4,10 @@
 # Customer-specific system prompt; copy SOUL.md.example to SOUL.md and edit.
 SOUL.md
 
+# Customer-specific fleet roster; copy store_registry.example.json to
+# store_registry.json and edit.
+store_registry.json
+
 # Python
 __pycache__/
 *.py[cod]

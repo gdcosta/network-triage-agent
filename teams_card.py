@@ -29,11 +29,16 @@ SEVERITY_STYLE = {
 }
 
 
-def _store_name(store: str, site: str | None) -> str:
+def _store_name(
+    store: str, site: str | None, registry: dict[str, str] | None = None,
+) -> str:
     """Compose the human-readable store_name shown at top-level in the
-    card payload. Uses whatever the LLM put in `site` verbatim (it may
-    already include state/region like 'Portland, OR'); if site is empty
-    the name falls back to just the store number."""
+    card payload. Resolution order:
+      1. Fleet registry (STORE_REGISTRY_PATH) — authoritative roster.
+      2. LLM-supplied site — fallback when the store isn't registered.
+      3. Bare store number — last resort if neither is available."""
+    if registry and store in registry:
+        return registry[store]
     if site:
         return f"Store {store} - {site}"
     return f"Store {store}"
@@ -58,7 +63,12 @@ def _iso_for_template(ts: Any) -> str:
     return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def build_card(report: dict[str, Any], splunk_base: str, meraki_base: str) -> dict[str, Any]:
+def build_card(
+    report: dict[str, Any],
+    splunk_base: str,
+    meraki_base: str,
+    store_names: dict[str, str] | None = None,
+) -> dict[str, Any]:
     severity = report.get("severity", "P3 MEDIUM")
     style, emoji = SEVERITY_STYLE.get(severity, ("default", "•"))
     iso = _iso_for_template(report.get("timestamp"))
@@ -155,14 +165,17 @@ def build_card(report: dict[str, Any], splunk_base: str, meraki_base: str) -> di
         "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
         "version": "1.5",
         "store_id": store,
-        "store_name": _store_name(store, report.get("site")),
+        "store_name": _store_name(store, report.get("site"), store_names),
         "body": body,
         "actions": _actions(store, splunk_base, meraki_base),
     }
 
 
 def build_recovery_card(
-    recovery: dict[str, Any], splunk_base: str, meraki_base: str,
+    recovery: dict[str, Any],
+    splunk_base: str,
+    meraki_base: str,
+    store_names: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     iso = _iso_for_template(recovery.get("timestamp"))
     store = recovery.get("store", "?")
@@ -208,7 +221,7 @@ def build_recovery_card(
         "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
         "version": "1.5",
         "store_id": store,
-        "store_name": _store_name(store, recovery.get("site")),
+        "store_name": _store_name(store, recovery.get("site"), store_names),
         "body": body,
         "actions": _actions(store, splunk_base, meraki_base),
     }

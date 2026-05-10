@@ -144,7 +144,9 @@ async def poll_once(
         if report.get("dedup_decision") != "send":
             continue
         try:
-            card = build_card(report, cfg.splunk_base_url, cfg.meraki_base_url)
+            card = build_card(
+            report, cfg.splunk_base_url, cfg.meraki_base_url, cfg.store_names,
+        )
             await poster(cfg.teams_webhook_url, card)
             state.record_sent(report)
             events.emit(
@@ -198,7 +200,9 @@ async def _send_recovery(
     payload = {**rec, "duration_minutes": duration_min,
                "timestamp": datetime.now(timezone.utc).isoformat()}
     try:
-        card = build_recovery_card(payload, cfg.splunk_base_url, cfg.meraki_base_url)
+        card = build_recovery_card(
+            payload, cfg.splunk_base_url, cfg.meraki_base_url, cfg.store_names,
+        )
         await poster(cfg.teams_webhook_url, card)
         events.emit(
             "recovery.posted", store=store, site=rec.get("site"),

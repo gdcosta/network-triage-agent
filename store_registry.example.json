@@ -1,0 +1,6 @@
+{
+  "_comment": "Map 3-digit store IDs to human-readable display names. Used to populate the top-level `store_name` field on every AdaptiveCard. Stores not listed here fall back to 'Store {id} - {site}' using whatever the LLM put in the report's `site` field. Copy this file to store_registry.json (gitignored) and replace with your real fleet. Path is configurable via STORE_REGISTRY_PATH env var.",
+  "001": "Store 001 - Springfield, IL",
+  "002": "Store 002 - Shelbyville, IL",
+  "003": "Store 003 - Capital City, IL"
+}

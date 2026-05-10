@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+import json
+import logging
 import os
 import shlex
 from dataclasses import dataclass
+from pathlib import Path
 
 from dotenv import load_dotenv
+
+log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -33,6 +38,9 @@ class Config:
     splunk_base_url: str
     meraki_base_url: str
 
+    # Fleet roster: store_id -> display name (e.g. "Store 047 - Portland, OR")
+    store_names: dict[str, str]
+
 
 def _parse_env_pairs(s: str) -> dict[str, str]:
     out: dict[str, str] = {}
@@ -43,6 +51,26 @@ def _parse_env_pairs(s: str) -> dict[str, str]:
         k, v = pair.split("=", 1)
         out[k.strip()] = v.strip()
     return out
+
+
+def _load_store_registry(path: str) -> dict[str, str]:
+    """Load the fleet roster JSON. Tolerant of a missing file — returns
+    an empty dict so unfamiliar stores fall back to LLM-derived names."""
+    p = Path(path)
+    if not p.is_file():
+        return {}
+    try:
+        raw = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as e:
+        log.warning("could not load store_registry from %s: %s", path, e)
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    # Drop the optional _comment key + ignore non-string values.
+    return {
+        str(k): str(v) for k, v in raw.items()
+        if not k.startswith("_") and isinstance(v, str)
+    }
 
 
 def load_config(mock: bool = False) -> Config:
@@ -75,4 +103,7 @@ def load_config(mock: bool = False) -> Config:
         latest_time=os.environ.get("LATEST_TIME", "now"),
         splunk_base_url=os.environ.get("SPLUNK_BASE_URL", "https://splunk.example.com"),
         meraki_base_url=os.environ.get("MERAKI_BASE_URL", "https://dashboard.meraki.com"),
+        store_names=_load_store_registry(
+            os.environ.get("STORE_REGISTRY_PATH", "store_registry.json")
+        ),
     )
