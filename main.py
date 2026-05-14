@@ -59,6 +59,16 @@ def _city_from_scans(store: str, scan_data: dict[str, list[dict]]) -> str | None
     return None
 
 
+def _touch_heartbeat(path: str) -> None:
+    """Best-effort liveness marker. The k8s exec probe checks this file's
+    age to confirm the poll loop is still turning. Never raises — a failed
+    touch must not take down the agent."""
+    try:
+        Path(path).touch()
+    except OSError as exc:
+        log.warning("heartbeat touch failed for %s: %s", path, exc)
+
+
 async def _mock_poster(_url: str, card: dict) -> None:
     body = card.get("body") or [{}]
     header = (body[0].get("items") or [{}])[0].get("text", "")
@@ -257,6 +267,9 @@ async def run(mock: bool = False) -> None:
         earliest=cfg.earliest_time,
         latest=cfg.latest_time,
     )
+    # Mark liveness immediately so the probe has a fresh file before the
+    # first (potentially slow) poll cycle finishes.
+    _touch_heartbeat(cfg.heartbeat_file)
 
     if mock:
         from mock_splunk import MockSplunkClient
@@ -294,6 +307,10 @@ async def run(mock: bool = False) -> None:
                     message=str(exc)[:300],
                 )
                 log.exception("poll cycle failed")
+            # Heartbeat after every cycle attempt — success or handled
+            # failure — so the probe tracks "loop is turning", not "loop
+            # is succeeding". A hung poll_once lets the file go stale.
+            _touch_heartbeat(cfg.heartbeat_file)
             if mock and hasattr(splunk, "advance"):
                 splunk.advance()
             if use_mock_llm and hasattr(llm, "cycle"):

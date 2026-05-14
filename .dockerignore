@@ -1,0 +1,23 @@
+# Keep the build context small and ensure customer-specific / local-only
+# files never land in the image.
+.git
+.venv
+path
+__pycache__
+**/__pycache__
+*.pyc
+.claude
+.DS_Store
+*.log
+
+# Secrets and customer data — these reach the container via k8s Secret/ConfigMap,
+# never baked into the image.
+.env
+SOUL.md
+store_registry.json
+
+# Not needed at runtime.
+k8s
+README.md
+*.example
+.env.example

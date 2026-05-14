@@ -34,6 +34,10 @@ class Config:
     earliest_time: str
     latest_time: str
 
+    # Liveness: the poll loop touches this file each cycle; a k8s exec
+    # probe checks its age to confirm the loop is still turning.
+    heartbeat_file: str
+
     # Card deep-link bases
     splunk_base_url: str
     meraki_base_url: str
@@ -101,6 +105,7 @@ def load_config(mock: bool = False) -> Config:
         poll_interval_seconds=int(os.environ.get("POLL_INTERVAL_SECONDS", "30")),
         earliest_time=os.environ.get("EARLIEST_TIME", "-5m"),
         latest_time=os.environ.get("LATEST_TIME", "now"),
+        heartbeat_file=os.environ.get("HEARTBEAT_FILE", "/tmp/agent-heartbeat"),
         splunk_base_url=os.environ.get("SPLUNK_BASE_URL", "https://splunk.example.com"),
         meraki_base_url=os.environ.get("MERAKI_BASE_URL", "https://dashboard.meraki.com"),
         store_names=_load_store_registry(

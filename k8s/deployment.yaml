@@ -1,0 +1,96 @@
+# Triage agent Deployment for the net-triage-agent namespace.
+#
+# Singleton workload: it polls Splunk and posts to Teams on a fixed cadence.
+# Running two replicas would double every alert, so replicas is pinned to 1
+# and the update strategy is Recreate (never run two pods at once, even
+# briefly during a rollout).
+#
+# Logs: the agent emits JSONL on stdout. The cluster's Splunk OTel Collector
+# agent DaemonSet scrapes container stdout automatically — no log wiring here.
+#
+# Prereqs (see k8s/README.md):
+#   - Secret    `kl-triage-secrets`  — credentials + Splunk MCP connection
+#   - ConfigMap `kl-triage-config`   — SOUL.md + store_registry.json
+#   - Image pushed to localhost:5000/kl-triage-agent:latest
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kl-triage-agent
+  namespace: net-triage-agent
+  labels:
+    app: kl-triage-agent
+    component: triage
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate          # singleton — never overlap two pods
+  selector:
+    matchLabels:
+      app: kl-triage-agent
+  template:
+    metadata:
+      labels:
+        app: kl-triage-agent
+        component: triage
+    spec:
+      terminationGracePeriodSeconds: 30   # agent handles SIGTERM -> emits agent.stop
+      containers:
+        - name: triage-agent
+          image: localhost:5000/kl-triage-agent:latest
+          imagePullPolicy: Always
+          # Credentials + Splunk MCP connection string (incl. the bearer token).
+          envFrom:
+            - secretRef:
+                name: kl-triage-secrets
+          # Non-secret behaviour tuning. Adjust freely without touching the Secret.
+          env:
+            - name: LLM_MODEL
+              value: claude-sonnet-4-6
+            - name: SOUL_PATH
+              value: /config/SOUL.md
+            - name: STORE_REGISTRY_PATH
+              value: /config/store_registry.json
+            - name: SPLUNK_TOOL_NAME
+              value: splunk_run_query
+            - name: SPLUNK_ROW_LIMIT
+              value: "1000"
+            - name: POLL_INTERVAL_SECONDS
+              value: "30"
+            - name: EARLIEST_TIME
+              value: "-5m"
+            - name: LATEST_TIME
+              value: now
+            - name: SPLUNK_BASE_URL
+              value: https://splunk.example.com
+            - name: MERAKI_BASE_URL
+              value: https://dashboard.meraki.com
+            - name: HEARTBEAT_FILE
+              value: /tmp/agent-heartbeat
+          volumeMounts:
+            - name: config
+              mountPath: /config
+              readOnly: true
+          resources:
+            requests:
+              cpu: 100m
+              memory: 192Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          # No HTTP server on this workload — liveness is the freshness of the
+          # heartbeat file the poll loop touches each cycle. If poll_once hangs,
+          # the file goes stale and the pod is restarted.
+          livenessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - 'test $(( $(date +%s) - $(stat -c %Y /tmp/agent-heartbeat 2>/dev/null || echo 0) )) -lt 150'
+            initialDelaySeconds: 20
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+      volumes:
+        - name: config
+          configMap:
+            name: kl-triage-config

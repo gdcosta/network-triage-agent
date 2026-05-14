@@ -8,6 +8,10 @@ SOUL.md
 # store_registry.json and edit.
 store_registry.json
 
+# Filled-in k8s Secret (route B). The .example template is committed; the
+# real one with credentials is not.
+k8s/secret.yaml
+
 # Python
 __pycache__/
 *.py[cod]
