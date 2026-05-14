@@ -50,6 +50,8 @@ mock_llm.py          Scripted LLM responses for offline demo
 SOUL.md.example      System-prompt template
 .env.example         Configuration template
 requirements.txt
+Dockerfile           Container image (Python + Node for the mcp-remote bridge)
+k8s/                 Kubernetes manifests + deployment runbook
 ```
 
 ## Quick start
@@ -167,6 +169,17 @@ python main.py | jq -rc 'select(.event == "triage.report") |
   "store=\(.store) action=\(.action) severity=\(.severity) — \(.dedup_rationale)"'
 ```
 
+## Deploying to Kubernetes
+
+The `k8s/` directory containerizes the agent as a singleton workload:
+
+- **`Dockerfile`** bundles Python and Node — the agent shells out to `mcp-remote` for the Splunk bridge, and the image bakes it in so a pod start needs no npm fetch. `SOUL.md` / `store_registry.json` are *not* baked in; the image carries no customer data.
+- **`k8s/deployment.yaml`** runs one replica with `strategy: Recreate` — two pollers would double every Teams alert. `SOUL.md` and `store_registry.json` mount from a ConfigMap; credentials come from a Secret.
+- **Liveness** is an exec probe on the heartbeat file the poll loop touches each cycle (`HEARTBEAT_FILE`) — the agent serves no HTTP, so there's nothing to `httpGet`.
+- **Logs need no wiring** — the JSONL stdout stream is picked up by a Splunk OpenTelemetry Collector DaemonSet's `filelog` receiver, the same pattern the observability section describes.
+
+See [`k8s/README.md`](k8s/README.md) for the full build → ConfigMap → Secret → apply → verify runbook.
+
 ## Configuration reference
 
 | Variable | Default | Description |
@@ -184,6 +197,8 @@ python main.py | jq -rc 'select(.event == "triage.report") |
 | `EARLIEST_TIME` / `LATEST_TIME` | `-5m` / `now` | SPL time window |
 | `SPLUNK_BASE_URL` | `https://splunk.example.com` | Used for "Open Splunk" deep-links in cards |
 | `MERAKI_BASE_URL` | `https://dashboard.meraki.com` | Used for "Meraki Dashboard" deep-links in cards |
+| `STORE_REGISTRY_PATH` | `store_registry.json` | Fleet roster JSON — maps store id to display name |
+| `HEARTBEAT_FILE` | `/tmp/agent-heartbeat` | Touched each poll cycle; the Kubernetes liveness probe checks its age |
 
 ## Adding a new failure scenario
 
