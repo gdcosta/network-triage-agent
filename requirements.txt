@@ -1,4 +1,7 @@
 anthropic>=0.40
-mcp>=1.0
+mcp==1.27.1  # pinned: last version whose FastMCP SSE transport is compatible with the bot's mcp-remote client (newer releases broke the /sse handshake → "Request validation failed"). See task #42.
 httpx>=0.27
 python-dotenv>=1.0
+# main.py: opt-in HTTP /state server (only when AGENT_STATE_PORT is set)
+# triage_mcp.py: hosts the MCP SSE transport
+aiohttp>=3.9

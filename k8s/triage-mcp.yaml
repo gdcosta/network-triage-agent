@@ -1,0 +1,340 @@
+# Triage MCP server companion to the triage agent.
+#
+# WHAT THIS DEPLOYS
+#   1. Service `triage-agent-state` exposing the agent pod's /state HTTP
+#      endpoint (port 8080) inside the cluster.
+#   2. Deployment `triage-mcp` running the triage_mcp.py FastMCP server
+#      that the chat bot (OpenClaw in kl-governance ns) connects to.
+#   3. Service `triage-mcp` exposing the MCP SSE port (8081) for the bot
+#      to reach via cross-namespace ClusterIP DNS.
+#
+# WHY SEPARATE DEPLOYMENT (not a sidecar in the agent pod)
+#   The triage agent is a singleton (replicas:1, strategy:Recreate — running
+#   two would double every alert). triage-mcp doesn't have that constraint
+#   and we want to be able to restart / scale it independently. Same image,
+#   different entrypoint command, so build cost is shared.
+#
+# WHY NO TLS HERE
+#   Cluster has Cilium WireGuard encryption enabled cluster-wide, so all
+#   pod-to-pod traffic is encrypted at the network layer. Plain HTTP between
+#   bot ↔ triage_mcp ↔ triage-agent rides over WireGuard tunnels. NetworkPolicy
+#   restricts WHO can reach these Services (see cilium-egress-policy in
+#   kl-governance/k8s/ + triage-mcp-ingress-policy below).
+---
+# Service for the triage agent's /state endpoint. Lives here (not in the
+# agent's deployment.yaml) because it only makes sense once triage-mcp is
+# deployed. Keep the agent's own manifest minimal.
+apiVersion: v1
+kind: Service
+metadata:
+  name: triage-agent-state
+  namespace: net-triage-agent
+  labels:
+    app: kl-triage-agent
+    component: triage
+spec:
+  selector:
+    app: kl-triage-agent
+  ports:
+    - name: state
+      port: 8080
+      targetPort: state
+  type: ClusterIP
+---
+# Task #40: DefenseClaw sidecar PVC for triage-mcp pod. Separate from
+# the triage-agent pod's defenseclaw-state PVC (RWO can't be cross-mounted
+# across pods that might land on different nodes). 5Gi mirrors the agent
+# side for consistency — gateway state + audit DB grow slowly.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: triage-mcp-defenseclaw-state
+  namespace: net-triage-agent
+  labels:
+    app: triage-mcp
+    component: chat-tooling
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: triage-mcp
+  namespace: net-triage-agent
+  labels:
+    app: triage-mcp
+    component: chat-tooling
+spec:
+  replicas: 1
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: triage-mcp
+  template:
+    metadata:
+      labels:
+        app: triage-mcp
+        component: chat-tooling
+    spec:
+      terminationGracePeriodSeconds: 15
+      # Task #40: PVC is freshly provisioned with root ownership; sidecar
+      # runs as uid 10002. Without this chown the daemon can't write its
+      # device.key / .env / audit.db / gateway.log. Same pattern as the
+      # triage-agent's fix-defenseclaw-perms init container (task #23).
+      initContainers:
+        - name: fix-defenseclaw-perms
+          image: busybox:1.36
+          command: ["sh", "-c"]
+          args:
+            - |
+              set -eu
+              chown -R 10002:10002 /defenseclaw-state
+              echo "ownership fixed"
+              ls -la /defenseclaw-state
+          securityContext:
+            runAsUser: 0
+          volumeMounts:
+            - name: defenseclaw-state
+              mountPath: /defenseclaw-state
+      containers:
+        - name: triage-mcp
+          image: localhost:5000/kl-triage-agent:latest
+          imagePullPolicy: Always
+          # Same image as the agent, different entrypoint.
+          command: ["python3", "triage_mcp.py"]
+          envFrom:
+            # triage_mcp queries LINDA Splunk (k8s_ws_logs index — has the
+            # OTel-collected container logs incl. the agent's JSONL events).
+            # That is a DIFFERENT Splunk environment than the one the agent
+            # itself queries (bob, with production retail telemetry). Hence
+            # this is a separate Secret with linda's MCP URL + bearer token,
+            # NOT kl-triage-secrets (which holds bob credentials).
+            #
+            # Provision the Secret with:
+            #   kubectl create secret generic kl-triage-mcp-secrets \
+            #     -n net-triage-agent \
+            #     --from-literal=TRIAGE_MCP_SPLUNK_COMMAND='npx' \
+            #     --from-literal=TRIAGE_MCP_SPLUNK_ARGS='-y mcp-remote
+            #         https://172.31.1.82:8089/services/mcp
+            #         --header "Authorization: Bearer <LINDA_SPLUNK_TOKEN>"' \
+            #     --from-literal=TRIAGE_MCP_SPLUNK_TOOL_NAME='splunk_run_query'
+            - secretRef:
+                name: kl-triage-mcp-secrets
+          env:
+            - name: TRIAGE_AGENT_STATE_URL
+              value: http://triage-agent-state.net-triage-agent.svc.cluster.local:8080/state
+            - name: TRIAGE_AGENT_HTTP_TIMEOUT
+              value: "3.0"
+            - name: TRIAGE_MCP_PORT
+              value: "8081"
+            - name: TRIAGE_MCP_HOST
+              value: 0.0.0.0
+            - name: TRIAGE_MCP_SPLUNK_ROW_LIMIT
+              value: "1000"
+            # Forwarded to the mcp-remote Node subprocess. Linda's Splunk
+            # uses a self-signed cert (same as bob); without this flag the
+            # TLS handshake fails. Comma-separated KEY=VALUE format.
+            - name: TRIAGE_MCP_ENV
+              value: "NODE_TLS_REJECT_UNAUTHORIZED=0"
+            - name: TRIAGE_EVENT_INDEX
+              value: k8s_ws_logs
+            # Per-query hard timeout (seconds). Splunk normally returns in
+            # <1s; this guards against hung queries blocking the MCP server.
+            - name: TRIAGE_SPLUNK_TIMEOUT
+              value: "10"
+            # In-process cache TTL for history-shaped Splunk queries (the
+            # bot often asks the same question repeatedly in a session).
+            # Live tools (list_active_alerts, get_recent_cycle) are never
+            # cached — they go straight to the agent's /state endpoint.
+            - name: TRIAGE_SPLUNK_CACHE_TTL
+              value: "30"
+            # DefenseClaw runtime inspection of triage-mcp's OWN Splunk queries
+            # (task #45). Gateway token is read from the sidecar's mirrored
+            # identity.json on the shared sidecar-identity volume (mounted below);
+            # the inspect API is the sidecar's :18970 (same pod, loopback).
+            - name: DEFENSECLAW_INSPECT_ENABLED
+              value: "true"
+          volumeMounts:
+            - name: sidecar-identity
+              mountPath: /var/run/sidecar-identity
+              readOnly: true
+          ports:
+            - name: mcp-sse
+              containerPort: 8081
+              protocol: TCP
+          resources:
+            requests:
+              cpu: 50m
+              memory: 96Mi
+            limits:
+              cpu: 300m
+              memory: 256Mi
+          # Liveness: just confirm the MCP port is accepting TCP connections.
+          # If FastMCP's HTTP server is dead, the pod restarts.
+          livenessProbe:
+            tcpSocket:
+              port: mcp-sse
+            initialDelaySeconds: 15
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+          # Readiness: same check + brief startup grace for the MCP server
+          # to bind. Pod stays out of the Service Endpoints until ready.
+          readinessProbe:
+            tcpSocket:
+              port: mcp-sse
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+
+        # --- DefenseClaw sidecar (task #40: colocate for demo completeness) ---
+        # No openclaw peer in this pod, so the sidecar's gateway client will
+        # log-spam "ws://127.0.0.1:18789 connection refused" (per the
+        # feedback_defenseclaw_sidecar_solo_mode memory). Daemon still emits
+        # lifecycle + scan events to the audit sink, which forwards to linda
+        # so the dashboard shows DefenseClaw running on this pod too.
+        #
+        # No MCP_PROXY_ENABLED here — the proxy is only useful for the
+        # triage-agent pod (intercepting bob calls). triage-mcp's own
+        # outbound (to linda Splunk + agent /state) isn't proxied today;
+        # that'd be a separate B′-like effort if we ever want it governed.
+        - name: defenseclaw-sidecar
+          image: localhost:5000/kl-defenseclaw-sidecar:latest
+          imagePullPolicy: Always
+          # Task #39: SPLUNK_HEC_TOKEN for the audit_sinks block in
+          # config.yaml — daemon pushes lifecycle/scan events to linda.
+          envFrom:
+            - secretRef:
+                name: kl-defenseclaw-secrets
+          env:
+            # Per-pod identity for DefenseClaw audit attribution (event.agent_name).
+            # Entrypoint appends these as a top-level agent: block in config.yaml.
+            - name: DEFENSECLAW_AGENT_ID
+              value: triage-mcp
+            - name: DEFENSECLAW_AGENT_NAME
+              value: "Triage MCP"
+          ports:
+            - name: guardrail
+              containerPort: 4000
+            - name: sidecar-api
+              containerPort: 18970
+          volumeMounts:
+            - name: defenseclaw-state
+              mountPath: /defenseclaw/.defenseclaw
+            # Shared tmpfs where the entrypoint's task#29 mirror writes
+            # identity.json (gateway token) for the app container to read (task #45).
+            - name: sidecar-identity
+              mountPath: /var/run/sidecar-identity
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          # Same loopback /health probe as the openclaw + triage-agent
+          # sidecars — daemon binds 127.0.0.1:18970, kubelet httpGet would
+          # get connection refused, so use exec+curl over loopback.
+          livenessProbe:
+            exec:
+              command: ["curl", "-fsS", "--max-time", "4", "http://127.0.0.1:18970/health"]
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            exec:
+              command: ["curl", "-fsS", "--max-time", "4", "http://127.0.0.1:18970/health"]
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+
+      volumes:
+        - name: defenseclaw-state
+          persistentVolumeClaim:
+            claimName: triage-mcp-defenseclaw-state
+        # In-memory shared identity: sidecar writes identity.json → app reads the
+        # gateway token for inspect-API auth (task #45). 1Mi tmpfs, matches kl-openclaw.
+        - name: sidecar-identity
+          emptyDir:
+            medium: Memory
+            sizeLimit: 1Mi
+---
+# Service the chat bot connects to via mcp-remote.
+# From kl-governance namespace, addressable as:
+#   triage-mcp.net-triage-agent.svc.cluster.local:8081
+apiVersion: v1
+kind: Service
+metadata:
+  name: triage-mcp
+  namespace: net-triage-agent
+  labels:
+    app: triage-mcp
+    component: chat-tooling
+spec:
+  selector:
+    app: triage-mcp
+  ports:
+    - name: mcp-sse
+      port: 8081
+      targetPort: mcp-sse
+  type: ClusterIP
+---
+# Cilium NetworkPolicy: only the OpenClaw chat bot pod (in kl-governance ns)
+# may reach the triage-mcp Service. Everything else is implicitly denied for
+# ingress to this pod because the policy selects it and Cilium switches to
+# default-deny once at least one policy applies.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: triage-mcp-ingress
+  namespace: net-triage-agent
+spec:
+  endpointSelector:
+    matchLabels:
+      app: triage-mcp
+  ingress:
+    - fromEndpoints:
+        - matchLabels:
+            io.kubernetes.pod.namespace: kl-governance
+            app: kl-openclaw
+      toPorts:
+        - ports:
+            - port: "8081"
+              protocol: TCP
+---
+# Cilium NetworkPolicy: only triage-mcp may reach the agent's /state endpoint.
+# The polling-loop agent serves /state intentionally narrow — operational
+# alert metadata, no credentials — but we still lock down who can read it.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: triage-agent-state-ingress
+  namespace: net-triage-agent
+spec:
+  endpointSelector:
+    matchLabels:
+      app: kl-triage-agent
+  ingress:
+    # Allow triage-mcp to fetch /state
+    - fromEndpoints:
+        - matchLabels:
+            io.kubernetes.pod.namespace: net-triage-agent
+            app: triage-mcp
+      toPorts:
+        - ports:
+            - port: "8080"
+              protocol: TCP
+    # Don't break other pod functions — the agent's polling loop sends
+    # cards to Teams (outbound) and queries Splunk (outbound), neither
+    # of which need ingress rules. The agent has no other ingress today.

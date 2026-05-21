@@ -25,6 +25,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import os
 import signal
 import sys
 import time
@@ -67,6 +68,45 @@ def _touch_heartbeat(path: str) -> None:
         Path(path).touch()
     except OSError as exc:
         log.warning("heartbeat touch failed for %s: %s", path, exc)
+
+
+async def _start_state_server(state: AlertState, port: int) -> Any:
+    """Start a small HTTP server exposing the agent's AlertState as JSON.
+
+    Opt-in via AGENT_STATE_PORT env var (default 0 = disabled). Used by the
+    triage_mcp service to answer "what is the agent currently working on?"
+    questions from the chat bot in real time. Returns the aiohttp AppRunner
+    so the caller can clean it up on shutdown.
+
+    The endpoint is intentionally narrow:
+      GET /state  → {cycle_id, updated_at, snapshot: {store: {...}, ...}}
+      GET /health → {ok: true}
+    No auth — relies on Cilium NetworkPolicy + WireGuard for in-cluster
+    confidentiality + access control.
+    """
+    from aiohttp import web
+
+    async def get_state(_request: web.Request) -> web.Response:
+        cycle_id, started_at = events.latest_cycle()
+        return web.json_response({
+            "cycle_id": cycle_id or None,
+            "updated_at": started_at.isoformat() if started_at else None,
+            "snapshot": state.snapshot(),
+        })
+
+    async def get_health(_request: web.Request) -> web.Response:
+        return web.json_response({"ok": True})
+
+    app = web.Application()
+    app.router.add_get("/state", get_state)
+    app.router.add_get("/health", get_health)
+
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    events.emit("agent.state_server.start", port=port, paths=["/state", "/health"])
+    return runner
 
 
 async def _mock_poster(_url: str, card: dict) -> None:
@@ -271,6 +311,19 @@ async def run(mock: bool = False) -> None:
     # first (potentially slow) poll cycle finishes.
     _touch_heartbeat(cfg.heartbeat_file)
 
+    # Opt-in HTTP state server for the triage_mcp companion service.
+    # Disabled by default (port=0) so legacy deployments without the MCP
+    # are unaffected. Set AGENT_STATE_PORT=8080 (or any free port) to enable.
+    state_runner = None
+    state_port = int(os.environ.get("AGENT_STATE_PORT", "0"))
+    if state_port > 0:
+        try:
+            state_runner = await _start_state_server(state, state_port)
+        except Exception as exc:
+            log.exception("failed to start state HTTP server on port %d", state_port)
+            events.emit("agent.state_server.failed",
+                        port=state_port, error=type(exc).__name__, message=str(exc)[:200])
+
     if mock:
         from mock_splunk import MockSplunkClient
         splunk_cm = MockSplunkClient()
@@ -319,6 +372,12 @@ async def run(mock: bool = False) -> None:
                 await asyncio.wait_for(stop_event.wait(), timeout=cfg.poll_interval_seconds)
             except asyncio.TimeoutError:
                 pass
+
+    if state_runner is not None:
+        try:
+            await state_runner.cleanup()
+        except Exception:
+            log.exception("error stopping state HTTP server")
 
     events.emit("agent.stop", active_stores=state.active_stores())
 

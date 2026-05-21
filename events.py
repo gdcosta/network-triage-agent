@@ -27,11 +27,28 @@ from typing import Any
 
 _cycle_id: contextvars.ContextVar[str] = contextvars.ContextVar("kl_cycle_id", default="")
 
+# Cycle metadata duplicated at module scope so out-of-task callers (the
+# /state HTTP server triage_mcp queries) can read "what cycle is currently
+# in progress?" without needing access to the polling task's context.
+_latest_cycle_id: str = ""
+_latest_cycle_started_at: datetime | None = None
+
 
 def new_cycle() -> str:
+    global _latest_cycle_id, _latest_cycle_started_at
     cid = uuid.uuid4().hex[:12]
     _cycle_id.set(cid)
+    _latest_cycle_id = cid
+    _latest_cycle_started_at = datetime.now(timezone.utc)
     return cid
+
+
+def latest_cycle() -> tuple[str, datetime | None]:
+    """Return (cycle_id, started_at) for the most recently started cycle.
+
+    Both values are empty/None until new_cycle() has been called at least once.
+    """
+    return _latest_cycle_id, _latest_cycle_started_at
 
 
 def emit(event: str, **fields: Any) -> None:
