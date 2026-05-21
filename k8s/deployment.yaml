@@ -12,6 +12,29 @@
 #   - Secret    `kl-triage-secrets`  — credentials + Splunk MCP connection
 #   - ConfigMap `kl-triage-config`   — SOUL.md + store_registry.json
 #   - Image pushed to localhost:5000/kl-triage-agent:latest
+#   - Image pushed to localhost:5000/kl-defenseclaw-sidecar:latest  (shared with kl-governance)
+#
+# DefenseClaw sidecar (added 2026-05-17 — task #23, Path D): colocated
+# observe-only, no interception of the agent's MCP/LLM/HTTP calls. The
+# sidecar runs the gateway daemon but nothing on this pod connects to it
+# yet — this gets the deployment topology right for future Path B′ work
+# (runtime governance via a thin MCP proxy in the sidecar) which lands
+# after the LangChain/LangGraph refactor. See task #34.
+---
+# DefenseClaw sidecar state — gateway's auto-generated token + .env + scan DB.
+# Mirror of kl-governance/k8s/deployment.yaml's defenseclaw-state PVC.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: defenseclaw-state
+  namespace: net-triage-agent
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -34,6 +57,24 @@ spec:
         component: triage
     spec:
       terminationGracePeriodSeconds: 30   # agent handles SIGTERM -> emits agent.stop
+      # The DefenseClaw PVC is freshly provisioned with root ownership.
+      # Sidecar runs as uid 10002; without this, mount is unwritable.
+      # (Pattern reused from kl-governance/k8s/deployment.yaml.)
+      initContainers:
+        - name: fix-defenseclaw-perms
+          image: busybox:1.36
+          command: ["sh", "-c"]
+          args:
+            - |
+              set -eu
+              chown -R 10002:10002 /defenseclaw-state
+              echo "ownership fixed"
+              ls -la /defenseclaw-state
+          securityContext:
+            runAsUser: 0      # needs root to chown
+          volumeMounts:
+            - name: defenseclaw-state
+              mountPath: /defenseclaw-state
       containers:
         - name: triage-agent
           image: localhost:5000/kl-triage-agent:latest
@@ -54,6 +95,19 @@ spec:
               value: splunk_run_query
             - name: SPLUNK_ROW_LIMIT
               value: "1000"
+            # --- Phase 2 of B′-2 RE-ENGAGED 2026-05-18 with proxy v1+prewarm ---
+            # Inline env OVERRIDES the same-named keys from kl-triage-secrets
+            # (k8s rule: env wins over envFrom on key collision). The agent's
+            # mcp-remote now connects to the proxy on 127.0.0.1:8788/sse
+            # instead of bob directly. The proxy holds the bob bearer token
+            # in its own secret (kl-sidecar-splunk-secrets) and forwards each
+            # call upstream while emitting governance.tool_call events.
+            # --allow-http is required because the proxy is plain HTTP (no TLS;
+            # intra-pod loopback only). Rollback: comment these two out, apply.
+            - name: SPLUNK_MCP_COMMAND
+              value: npx
+            - name: SPLUNK_MCP_ARGS
+              value: "-y mcp-remote http://127.0.0.1:8788/sse --allow-http"
             - name: POLL_INTERVAL_SECONDS
               value: "30"
             - name: EARLIEST_TIME
@@ -66,6 +120,16 @@ spec:
               value: https://dashboard.meraki.com
             - name: HEARTBEAT_FILE
               value: /tmp/agent-heartbeat
+            # Opt-in HTTP /state endpoint for the triage_mcp companion service.
+            # Set to 0 (or unset) to disable. See triage_mcp.py for the
+            # consumer side and how the bot uses this for "what is the agent
+            # currently working on?" questions.
+            - name: AGENT_STATE_PORT
+              value: "8080"
+          ports:
+            - name: state
+              containerPort: 8080
+              protocol: TCP
           volumeMounts:
             - name: config
               mountPath: /config
@@ -90,7 +154,107 @@ spec:
             periodSeconds: 30
             timeoutSeconds: 5
             failureThreshold: 3
+
+        # --- DefenseClaw sidecar (Path B′-2 Phase 1: proxy enabled) -------
+        # Runs defenseclaw-gateway daemon AND the MCP proxy (mcp_proxy.py
+        # baked into the image when MCP_PROXY_ENABLED=true). The proxy listens
+        # on 127.0.0.1:8788 inside the pod and exposes splunk_run_query as a
+        # FastMCP SSE endpoint. Bob bearer token lives in this container's
+        # env via kl-sidecar-splunk-secrets — NOT in the agent's secret.
+        #
+        # Phase 1 (current): agent still talks directly to bob; proxy runs
+        # idle. Validates the proxy starts cleanly under cluster conditions.
+        # Phase 2 will flip the agent's SPLUNK_MCP_ARGS to point here.
+        - name: defenseclaw-sidecar
+          image: localhost:5000/kl-defenseclaw-sidecar:latest
+          imagePullPolicy: Always
+          # SPLUNK_MCP_COMMAND / SPLUNK_MCP_ARGS (incl. bob bearer token) /
+          # SPLUNK_MCP_ENV come from this secret. NEVER put them inline.
+          envFrom:
+            - secretRef:
+                name: kl-sidecar-splunk-secrets
+            # Task #39: SPLUNK_HEC_TOKEN for the audit_sinks block in
+            # config.yaml — the daemon resolves it via splunk_hec.token_env
+            # to push every guardrail/inspect/scan audit event to linda HEC.
+            # Even though THIS sidecar has no openclaw peer (so few events
+            # to emit), keeping config + env consistent across both pods
+            # avoids drift if we later add policy-hook for the MCP proxy.
+            # Provision: kubectl create secret generic kl-defenseclaw-secrets \
+            #   -n net-triage-agent --from-literal=SPLUNK_HEC_TOKEN='<token>'
+            - secretRef:
+                name: kl-defenseclaw-secrets
+          env:
+            # Triggers the entrypoint to launch mcp_proxy.py alongside
+            # defenseclaw-gateway. Without this the proxy code is in the
+            # image but dormant (the kl-openclaw pod's sidecar leaves it off).
+            - name: MCP_PROXY_ENABLED
+              value: "true"
+            # Bind loopback only — same net-ns as triage-agent container
+            # means localhost reaches the proxy. No NetworkPolicy needed for
+            # intra-pod traffic; 127.0.0.1 keeps it off the pod IP entirely.
+            - name: MCP_PROXY_HOST
+              value: 127.0.0.1
+            - name: MCP_PROXY_PORT
+              value: "8788"
+            # Upstream tool name on bob — same as the agent's SPLUNK_TOOL_NAME.
+            - name: SPLUNK_TOOL_NAME
+              value: splunk_run_query
+            # Per-pod identity for DefenseClaw audit attribution (event.agent_name).
+            # Entrypoint appends these as a top-level agent: block in config.yaml.
+            - name: DEFENSECLAW_AGENT_ID
+              value: kl-triage-agent
+            - name: DEFENSECLAW_AGENT_NAME
+              value: "KL Triage Agent"
+          ports:
+            - name: guardrail
+              containerPort: 4000
+            - name: sidecar-api
+              containerPort: 18970
+            # Proxy listener (127.0.0.1 only — not really reachable via this
+            # port name, but declaring it makes the topology self-documenting).
+            - name: mcp-proxy
+              containerPort: 8788
+          volumeMounts:
+            - name: defenseclaw-state
+              mountPath: /defenseclaw/.defenseclaw
+          resources:
+            requests:
+              cpu: 150m         # +50m for the Python proxy idle
+              memory: 256Mi     # Python + mcp SDK + Go gateway resident at idle
+            limits:
+              cpu: 1000m        # bumped for occasional Node mcp-remote subprocesses (one per agent call)
+              # Per-call model spawns one `npx mcp-remote` Node process (~100-150Mi)
+              # per splunk_run_query; a drill cycle fires up to ~9 concurrently. At
+              # 512Mi the proxy was OOM-killed (SIGKILL) under that load → sidecar
+              # CrashLoopBackOff → agent ECONNREFUSED on :8788. 1.5Gi gives headroom
+              # for peak concurrent subprocesses + Python proxy + Go gateway daemon.
+              # Real fix is task #35 (drop npx, reuse one mcp-remote) — this is the stopgap.
+              memory: 1536Mi
+          # Same loopback issue as kl-openclaw pod — sidecar's /health binds
+          # 127.0.0.1, so a kubelet httpGet to the pod IP gets refused. Use
+          # exec+curl over loopback so the probe runs inside the container.
+          # Probes check the gateway's /health, NOT the proxy. We deliberately
+          # don't fail the pod on proxy crash in Phase 1 (the agent doesn't
+          # depend on it yet). When Phase 2 lands, add an additional probe
+          # against 127.0.0.1:8788/sse to fail-fast on proxy outage.
+          livenessProbe:
+            exec:
+              command: ["curl", "-fsS", "--max-time", "4", "http://127.0.0.1:18970/health"]
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            exec:
+              command: ["curl", "-fsS", "--max-time", "4", "http://127.0.0.1:18970/health"]
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
       volumes:
         - name: config
           configMap:
             name: kl-triage-config
+        - name: defenseclaw-state
+          persistentVolumeClaim:
+            claimName: defenseclaw-state
