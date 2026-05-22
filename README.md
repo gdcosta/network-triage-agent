@@ -1,6 +1,6 @@
 # Network Triage Agent
 
-An LLM-powered network triage agent for retail store fleets. Every 30 seconds it polls four Cisco data domains via a Splunk MCP server, hands the raw results to Claude Sonnet (with a domain-specific system prompt), and posts AdaptiveCard alerts to a Microsoft Teams Workflows channel.
+An LLM-powered network triage agent for retail store fleets. Every 30 seconds it polls four Cisco data domains via a Splunk MCP server, hands the raw results to Claude (with a domain-specific system prompt), and posts AdaptiveCard alerts to a Microsoft Teams Workflows channel.
 
 The LLM is the brain. Python is plumbing — query execution, webhook POST, polling cadence. Detection thresholds, scope and severity reasoning, root-cause attribution across domains, dedup, and recovery decisions all live in [`SOUL.md`](#souldmd--the-system-prompt) and are produced at runtime by the model. Adding a new failure scenario or changing severity behavior is a prompt edit, not a code change.
 
@@ -32,11 +32,19 @@ The four data domains, in triage order:
 
 The 3-digit store number is the universal correlation key extracted from hostnames (`kl-237-portland-rtr-1`), Meraki networkIds (`N_KL0000237`), and ISE device names (`KL-237-AP`).
 
+### Companion surfaces
+
+Two components build on the autonomous loop:
+
+- **Chat surface (`triage_mcp.py`)** — a FastMCP (SSE) server that exposes the agent's own knowledge as MCP tools — `list_active_alerts`, `get_alert`, `get_alert_history`, `get_recent_cycle` — to a Microsoft Teams chat bot. It reads the agent's live state over an opt-in HTTP `/state` endpoint (`AGENT_STATE_PORT`) and pulls historical `triage.report` events from Splunk, so a practitioner can ask "what's firing on store 047?" or "has it been flaky this week?" interactively. Deployed separately via `k8s/triage-mcp.yaml`.
+- **Governance sidecar (Cisco DefenseClaw)** — in Kubernetes, the agent's Splunk calls route through an in-pod DefenseClaw MCP proxy that inspects and audits every tool call before it runs; the Splunk credential lives only in the sidecar, never the agent. Inspect / block / prompt-injection-alert events are forwarded to an audit index for a governance dashboard.
+
 ## Repository layout
 
 ```
-main.py              Polling loop + orchestrator
+main.py              Polling loop + orchestrator (+ opt-in /state HTTP endpoint)
 llm_client.py        Anthropic SDK wrapper · two tool schemas
+triage_mcp.py        Companion MCP server (FastMCP SSE) for the chat bot
 splunk_client.py     MCP stdio bridge wrapper
 correlation.py       Parallel drill-query runner
 teams_card.py        AdaptiveCard builder + webhook POST
@@ -51,7 +59,7 @@ SOUL.md.example      System-prompt template
 .env.example         Configuration template
 requirements.txt
 Dockerfile           Container image (Python + Node for the mcp-remote bridge)
-k8s/                 Kubernetes manifests + deployment runbook
+k8s/                 Kubernetes manifests (agent + triage-mcp + DefenseClaw sidecar) + runbook
 ```
 
 ## Quick start
@@ -115,7 +123,7 @@ python main.py --mock
 
 Uses canned Splunk data and a scripted LLM (no API key, no Splunk, no Teams). Cycles through 6 scenarios — healthy → P2 alert → dedup skip → P1 escalation → recovery → healthy — so you can watch the full pipeline end-to-end. Pair with `POLL_INTERVAL_SECONDS=2` to compress the demo into ~12 seconds.
 
-If you set `ANTHROPIC_API_KEY` while passing `--mock`, the canned Splunk data is sent to the real Sonnet model — useful for iterating on `SOUL.md` without burning real Splunk queries.
+If you set `ANTHROPIC_API_KEY` while passing `--mock`, the canned Splunk data is sent to the real Claude model — useful for iterating on `SOUL.md` without burning real Splunk queries.
 
 ## `SOUL.md` — the system prompt
 
@@ -177,6 +185,7 @@ The `k8s/` directory containerizes the agent as a singleton workload:
 - **`k8s/deployment.yaml`** runs one replica with `strategy: Recreate` — two pollers would double every Teams alert. `SOUL.md` and `store_registry.json` mount from a ConfigMap; credentials come from a Secret.
 - **Liveness** is an exec probe on the heartbeat file the poll loop touches each cycle (`HEARTBEAT_FILE`) — the agent serves no HTTP, so there's nothing to `httpGet`.
 - **Logs need no wiring** — the JSONL stdout stream is picked up by a Splunk OpenTelemetry Collector DaemonSet's `filelog` receiver, the same pattern the observability section describes.
+- **Governance + chat companions** — `k8s/deployment.yaml` also colocates a Cisco DefenseClaw sidecar (an MCP proxy that inspects/audits the agent's Splunk calls; the Splunk credential is held only by the sidecar). The `triage_mcp` chat-surface server deploys separately via `k8s/triage-mcp.yaml`.
 
 See [`k8s/README.md`](k8s/README.md) for the full build → ConfigMap → Secret → apply → verify runbook.
 
@@ -185,7 +194,7 @@ See [`k8s/README.md`](k8s/README.md) for the full build → ConfigMap → Secret
 | Variable | Default | Description |
 |---|---|---|
 | `ANTHROPIC_API_KEY` | *required* | Auth to the Anthropic API |
-| `LLM_MODEL` | `claude-sonnet-4-6` | Claude model id |
+| `LLM_MODEL` | `claude-sonnet-4-6` | Claude model id (the bundled k8s deployment overrides this to `claude-haiku-4-5-20251001` for cost) |
 | `SOUL_PATH` | `SOUL.md` | Path to the system-prompt file |
 | `SPLUNK_MCP_COMMAND` | *required* | Stdio command to launch the Splunk MCP bridge (`npx`, `docker`, etc.) |
 | `SPLUNK_MCP_ARGS` | empty | Args for that command |
@@ -199,6 +208,7 @@ See [`k8s/README.md`](k8s/README.md) for the full build → ConfigMap → Secret
 | `MERAKI_BASE_URL` | `https://dashboard.meraki.com` | Used for "Meraki Dashboard" deep-links in cards |
 | `STORE_REGISTRY_PATH` | `store_registry.json` | Fleet roster JSON — maps store id to display name |
 | `HEARTBEAT_FILE` | `/tmp/agent-heartbeat` | Touched each poll cycle; the Kubernetes liveness probe checks its age |
+| `AGENT_STATE_PORT` | `0` (off) | Opt-in HTTP port serving live `AlertState` as JSON for the `triage_mcp` companion; `0`/unset disables. (`triage_mcp.py` carries its own `TRIAGE_MCP_*` config — see `.env.example`.) |
 
 ## Adding a new failure scenario
 
