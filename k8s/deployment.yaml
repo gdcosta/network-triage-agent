@@ -85,8 +85,14 @@ spec:
                 name: kl-triage-secrets
           # Non-secret behaviour tuning. Adjust freely without touching the Secret.
           env:
+            # Haiku 4.5: strong tool-calling, ~10x cheaper than Sonnet/Opus.
+            # The agent is the volume driver (~2 LLM calls / 30s cycle), so this
+            # is the biggest cost lever. SOUL.md + tools are prompt-cached and
+            # the triage pass only fires on detection hits, so per-cycle cost is
+            # mostly the (now-Haiku, cached) detection pass. Revert to
+            # claude-sonnet-4-6 if triage card quality regresses.
             - name: LLM_MODEL
-              value: claude-sonnet-4-6
+              value: claude-haiku-4-5-20251001
             - name: SOUL_PATH
               value: /config/SOUL.md
             - name: STORE_REGISTRY_PATH
