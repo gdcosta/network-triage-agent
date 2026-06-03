@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import logging
 import os
 import signal
@@ -289,6 +290,64 @@ async def _send_recovery(
         log.exception("recovery webhook failed for store %s", store)
 
 
+def _bootstrap_defenseclaw_proxy_headers(wait_seconds: int = 60) -> None:
+    """Task #55: make the agent's Anthropic SDK calls authenticate to the
+    local DefenseClaw guardrail proxy.
+
+    When ANTHROPIC_BASE_URL points at the sidecar proxy (http://127.0.0.1:4000),
+    every /v1/messages call is intercepted by DefenseClaw's openclaw connector.
+    That connector authenticates each hop via `X-DC-Auth: Bearer <gateway-token>`
+    and learns the real upstream from `X-DC-Target-URL` — the exact headers
+    OpenClaw's fetch-interceptor plugin injects for the bot (DefenseClaw
+    extensions/defenseclaw/src/fetch-interceptor.ts :: buildProxyHeaders). Our
+    plain AsyncAnthropic doesn't speak that dialect, so without these headers
+    the proxy rejects with AUTH_MISSING_TOKEN — surfaced to the SDK as a
+    synthetic 401 invalid_api_key. We set both via ANTHROPIC_CUSTOM_HEADERS,
+    which the SDK parses natively. The agent's own x-api-key passes through
+    untouched as the upstream provider key (the connector reads it via
+    ExtractAPIKey and strips the X-DC-* headers before forwarding upstream).
+
+    The gateway token is written by the sidecar to a shared in-memory volume
+    at /var/run/sidecar-identity/identity.json (task #29). Sidecar and agent
+    start in parallel, so we poll briefly for that file to appear.
+
+    No-op (so local dev / --mock / direct-to-Anthropic are unaffected) when
+    ANTHROPIC_BASE_URL is unset, when an operator already supplied
+    ANTHROPIC_CUSTOM_HEADERS, or when the identity file never appears (logged,
+    then calls 401 visibly rather than silently bypassing governance)."""
+    if not os.environ.get("ANTHROPIC_BASE_URL"):
+        return
+    if os.environ.get("ANTHROPIC_CUSTOM_HEADERS"):
+        return  # operator-supplied headers win; don't clobber
+
+    path = "/var/run/sidecar-identity/identity.json"
+    token = ""
+    for _ in range(max(1, wait_seconds)):
+        try:
+            with open(path) as f:
+                token = (json.load(f) or {}).get("token", "") or ""
+        except (OSError, json.JSONDecodeError):
+            token = ""
+        if token:
+            break
+        time.sleep(1)
+
+    if not token:
+        events.emit(
+            "llm.proxy_auth.unavailable",
+            path=path,
+            reason="no gateway token after wait; proxy calls will 401",
+        )
+        return
+
+    target = os.environ.get("ANTHROPIC_PROXY_TARGET_URL", "https://api.anthropic.com")
+    os.environ["ANTHROPIC_CUSTOM_HEADERS"] = (
+        f"X-DC-Auth: Bearer {token}\n"
+        f"X-DC-Target-URL: {target}"
+    )
+    events.emit("llm.proxy_auth.ready", target=target, token_chars=len(token))
+
+
 async def run(mock: bool = False) -> None:
     cfg = load_config(mock=mock)
     state = AlertState()
@@ -310,6 +369,12 @@ async def run(mock: bool = False) -> None:
     # Mark liveness immediately so the probe has a fresh file before the
     # first (potentially slow) poll cycle finishes.
     _touch_heartbeat(cfg.heartbeat_file)
+
+    # Task #55: if routed through the DefenseClaw guardrail proxy, materialize
+    # the X-DC-Auth / X-DC-Target-URL headers before the LLM client is built.
+    # Heartbeat is already fresh above, so the brief wait-for-identity here
+    # cannot trip the liveness probe.
+    _bootstrap_defenseclaw_proxy_headers()
 
     # Opt-in HTTP state server for the triage_mcp companion service.
     # Disabled by default (port=0) so legacy deployments without the MCP
@@ -423,6 +488,9 @@ async def preflight() -> int:
     print("[2/3] Anthropic API")
     try:
         from anthropic import AsyncAnthropic
+        # Same proxy-auth bootstrap as run(), but with a short wait so a
+        # preflight against a missing sidecar fails fast instead of hanging.
+        _bootstrap_defenseclaw_proxy_headers(wait_seconds=5)
         client = AsyncAnthropic(api_key=cfg.anthropic_api_key)
         resp = await client.messages.create(
             model=cfg.llm_model,

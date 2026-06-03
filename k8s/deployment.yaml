@@ -93,6 +93,16 @@ spec:
             # claude-sonnet-4-6 if triage card quality regresses.
             - name: LLM_MODEL
               value: claude-haiku-4-5-20251001
+            # Task #55: route the agent's Anthropic SDK calls through the
+            # local DefenseClaw guardrail proxy instead of going direct to
+            # api.anthropic.com. Closes the indirect-injection / blast-radius
+            # gap — the bot's LLM is already proxied via OpenClaw's fetch
+            # interceptor; this brings the agent (which uses AsyncAnthropic
+            # directly) to the same governance posture. The SDK reads this
+            # env var natively (anthropic/_client.py:222). Same network
+            # namespace as the sidecar, so 127.0.0.1:4000 reaches the proxy.
+            - name: ANTHROPIC_BASE_URL
+              value: http://127.0.0.1:4000
             - name: SOUL_PATH
               value: /config/SOUL.md
             - name: STORE_REGISTRY_PATH
@@ -139,6 +149,13 @@ spec:
           volumeMounts:
             - name: config
               mountPath: /config
+              readOnly: true
+            # Task #55: read-only view of the shared in-memory volume the
+            # sidecar writes identity.json into. main.py reads the gateway
+            # token from here to build the X-DC-Auth header that authenticates
+            # LLM calls to the local DefenseClaw proxy.
+            - name: sidecar-identity
+              mountPath: /var/run/sidecar-identity
               readOnly: true
           resources:
             requests:
@@ -223,6 +240,11 @@ spec:
           volumeMounts:
             - name: defenseclaw-state
               mountPath: /defenseclaw/.defenseclaw
+            # Task #55: writable mount of the shared in-memory volume. The
+            # entrypoint derives identity.json (deviceId + gateway token) here
+            # once the gateway has booted, for the agent container to consume.
+            - name: sidecar-identity
+              mountPath: /var/run/sidecar-identity
           resources:
             requests:
               cpu: 150m         # +50m for the Python proxy idle
@@ -264,3 +286,11 @@ spec:
         - name: defenseclaw-state
           persistentVolumeClaim:
             claimName: defenseclaw-state
+        # Task #55: pod-local tmpfs the sidecar writes identity.json into and
+        # the agent reads the gateway token from. Memory-backed + 1Mi cap +
+        # never persisted — mirrors the kl-openclaw pod's identity-sharing
+        # pattern (task #29). The token never touches disk.
+        - name: sidecar-identity
+          emptyDir:
+            medium: Memory
+            sizeLimit: 1Mi
