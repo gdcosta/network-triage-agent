@@ -234,13 +234,17 @@ spec:
             # identity.json (gateway token) for the app container to read (task #45).
             - name: sidecar-identity
               mountPath: /var/run/sidecar-identity
+          # Task #62: bumped to match kl-triage-agent's sidecar (already at
+          # this profile after its OOM under YARA-loaded scans). The plugin-
+          # scanner install in the image spawns Python + cisco-ai-skill-scanner
+          # + cisco-ai-mcp-scanner hourly; old 256Mi cap risked OOMKilled.
           resources:
             requests:
-              cpu: 100m
-              memory: 128Mi
-            limits:
-              cpu: 500m
+              cpu: 150m
               memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 1536Mi
           # Same loopback /health probe as the openclaw + triage-agent
           # sidecars — daemon binds 127.0.0.1:18970, kubelet httpGet would
           # get connection refused, so use exec+curl over loopback.
