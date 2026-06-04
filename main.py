@@ -203,10 +203,22 @@ async def poll_once(
     )
 
     # 3. Recovery cards
-    if decision.recovery_stores:
+    # Guard B: a store cannot be both recovered AND actively alerting in the same
+    # cycle. If detection lists a store in BOTH correlate_stores and
+    # recovery_stores, that's self-contradictory — trust the active alert and drop
+    # the recovery. Without this, a still-critical store flaps: recovery card +
+    # P1 card every cycle (observed 2026-06-03 on store 305, still hard-down).
+    # Deterministic; the alert wins over the LLM's contradictory recovery claim.
+    correlating = {s.get("store") for s in decision.correlate_stores}
+    recoveries = [r for r in decision.recovery_stores
+                  if r.get("store") not in correlating]
+    for store in (r.get("store") for r in decision.recovery_stores
+                  if r.get("store") in correlating):
+        events.emit("recovery.suppressed", store=store, reason="also_correlating")
+    if recoveries:
         await asyncio.gather(*[
             _send_recovery(rec, state, cfg, poster, scan_data)
-            for rec in decision.recovery_stores
+            for rec in recoveries
         ], return_exceptions=True)
 
     # 4. Drill in parallel for each correlated store
@@ -215,7 +227,7 @@ async def poll_once(
             "poll.complete",
             duration_ms=int((time.monotonic() - cycle_started) * 1000),
             cards_posted=0,
-            recoveries=len(decision.recovery_stores),
+            recoveries=len(recoveries),
         )
         return
 
@@ -279,7 +291,7 @@ async def poll_once(
         "poll.complete",
         duration_ms=int((time.monotonic() - cycle_started) * 1000),
         cards_posted=posted,
-        recoveries=len(decision.recovery_stores),
+        recoveries=len(recoveries),
     )
 
 
@@ -305,9 +317,16 @@ async def _send_recovery(
 ) -> None:
     store = rec.get("store", "")
     prev = state.clear(store)
-    duration_min = None
-    if prev is not None:
-        duration_min = (datetime.now(timezone.utc) - prev.first_seen).total_seconds() / 60.0
+    # Guard A: you can't recover what was never open. If the LLM names a store in
+    # recovery_stores that has no open alert in AlertState (prev is None), it's a
+    # phantom recovery — suppress it. Without this, a single hallucinated
+    # recovery_stores list posts "resolved" cards for healthy, never-alerted
+    # stores (observed 2026-06-03: 5 healthy stores resolved in one cycle while
+    # store 305 was still hard-down). Deterministic; independent of LLM judgment.
+    if prev is None:
+        events.emit("recovery.suppressed", store=store, reason="no_open_alert")
+        return
+    duration_min = (datetime.now(timezone.utc) - prev.first_seen).total_seconds() / 60.0
     payload = {**rec, "duration_minutes": duration_min,
                "timestamp": datetime.now(timezone.utc).isoformat()}
     log_city = _city_from_scans(store, scan_data or {})
