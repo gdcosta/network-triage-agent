@@ -284,6 +284,19 @@ async def poll_once(
                 reason="not_a_p_tier",
             )
             continue
+        # Recovery cooldown (task #66): suppress a NEW alert for a store that
+        # recovered within the cooldown window. The detection pass oscillates
+        # recover<->critical while the -5m scan window still holds stale fault
+        # data, so without this a just-recovered store immediately re-alerts
+        # (recover -> P-tier re-alert -> recover flap, observed on 047/521
+        # 2026-06-04). Let the window age out before alerting resumes.
+        if state.in_cooldown(report.get("store", ""), cfg.recovery_cooldown_seconds):
+            events.emit(
+                "alert.cooldown_suppressed",
+                store=report.get("store"),
+                severity=report.get("severity"),
+            )
+            continue
         # Severity hysteresis (task #66): escalate fast, de-escalate slow. Damps
         # the LLM flapping a stable incident's tier (observed P1<->P2 on store 305,
         # 2026-06-04). A downgrade is held at the confirmed tier until the lower

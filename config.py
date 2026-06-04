@@ -46,6 +46,12 @@ class Config:
     earliest_time: str
     latest_time: str
 
+    # Task #66 recovery cooldown: after a store recovers, suppress new alert
+    # cards for it this many seconds. Should be >= the scan horizon (earliest_time)
+    # so stale fault data ages out of the window before alerting can resume —
+    # otherwise the detection pass re-alerts the just-recovered store.
+    recovery_cooldown_seconds: int
+
     # Liveness: the poll loop touches this file each cycle; a k8s exec
     # probe checks its age to confirm the loop is still turning.
     heartbeat_file: str
@@ -124,6 +130,9 @@ def load_config(mock: bool = False) -> Config:
         poll_interval_seconds=int(os.environ.get("POLL_INTERVAL_SECONDS", "30")),
         earliest_time=os.environ.get("EARLIEST_TIME", "-5m"),
         latest_time=os.environ.get("LATEST_TIME", "now"),
+        recovery_cooldown_seconds=int(
+            os.environ.get("RECOVERY_COOLDOWN_SECONDS", "300")
+        ),
         heartbeat_file=os.environ.get("HEARTBEAT_FILE", "/tmp/agent-heartbeat"),
         splunk_base_url=os.environ.get("SPLUNK_BASE_URL", "https://splunk.example.com"),
         meraki_base_url=os.environ.get("MERAKI_BASE_URL", "https://dashboard.meraki.com"),

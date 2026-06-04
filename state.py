@@ -44,6 +44,9 @@ class AlertState:
     # Tracks how many consecutive cycles a downgrade has been proposed, so a
     # flapping tier isn't accepted until it persists. See effective_severity.
     _downgrade: dict[str, tuple[str, int]] = field(default_factory=dict)
+    # Task #66 recovery cooldown: store -> UTC time it last recovered. New alerts
+    # for the store are suppressed for a window after this. See in_cooldown.
+    _recovered_at: dict[str, datetime] = field(default_factory=dict)
     # Task #56 stage 1: the agent's OWN past triage.report events, read back
     # from triage-mcp's get_alert_history at startup (and refreshed per cycle in
     # later stages). Read-only context — deliberately NOT merged into _active, so
@@ -139,7 +142,27 @@ class AlertState:
 
     def clear(self, store: str) -> _Active | None:
         self._downgrade.pop(store, None)
-        return self._active.pop(store, None)
+        prev = self._active.pop(store, None)
+        if prev is not None:
+            # A real recovery just happened — start the cooldown window.
+            self._recovered_at[store] = datetime.now(timezone.utc)
+        return prev
+
+    def in_cooldown(self, store: str, window_seconds: float) -> bool:
+        """Task #66 recovery cooldown: True if `store` recovered within the last
+        `window_seconds`.
+
+        Used to suppress NEW alert cards right after a recovery. The detection
+        pass oscillates recover<->critical while the -5m scan window still holds
+        stale fault data, so without this a just-recovered store immediately
+        re-alerts (recover -> P-tier -> recover flap on 047/521, 2026-06-04).
+        Set the window >= the scan horizon (EARLIEST_TIME) so the stale data ages
+        out before alerting resumes.
+        """
+        ts = self._recovered_at.get(store)
+        if ts is None:
+            return False
+        return (datetime.now(timezone.utc) - ts).total_seconds() < window_seconds
 
     def is_active(self, store: str) -> bool:
         return store in self._active
