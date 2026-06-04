@@ -264,6 +264,17 @@ async def poll_once(
         # must come through the recovery path (recovery_stores -> recovery.posted),
         # never as an alert card — so suppress non-tier severities to stop a
         # premature "RESOLVED" leaking out the alert channel. (Task #66.)
+        # An alert card must carry a real severity tier (P1/P2/P3). The triage LLM
+        # sometimes emits severity="RESOLVED" on the ALERT path during a store's
+        # recovery transition (observed 2026-06-03 on 418/047). A real recovery
+        # must come through the recovery path (recovery_stores -> recovery.posted),
+        # never as an alert card — so suppress non-tier severities to stop a
+        # premature "RESOLVED" leaking out the alert channel. (Task #66.)
+        # NB: converting RESOLVED -> immediate recovery (option c) was tried and
+        # reverted 2026-06-04 — it cleared state before the -5m scan window aged
+        # out, so the detection pass re-flagged the store as a fresh fault (P2
+        # re-alert flap on 521). Recovery stays on the detection pass, which waits
+        # for the window to clear and so can't re-alert.
         sev = (report.get("severity") or "").strip().upper()
         if not sev.startswith(("P1", "P2", "P3")):
             events.emit(
@@ -273,6 +284,23 @@ async def poll_once(
                 reason="not_a_p_tier",
             )
             continue
+        # Severity hysteresis (task #66): escalate fast, de-escalate slow. Damps
+        # the LLM flapping a stable incident's tier (observed P1<->P2 on store 305,
+        # 2026-06-04). A downgrade is held at the confirmed tier until the lower
+        # tier persists a few cycles; escalations apply at once. The card uses the
+        # held severity; the raw LLM value is preserved in the triage.report event
+        # above. When held, the severity matches the confirmed tier, so the dedup
+        # backstop below suppresses the (now-duplicate) card.
+        proposed_sev = report.get("severity")
+        held_sev = state.effective_severity(report.get("store", ""), proposed_sev or "")
+        if held_sev != proposed_sev:
+            events.emit(
+                "severity.held",
+                store=report.get("store"),
+                proposed=proposed_sev,
+                held_at=held_sev,
+            )
+            report["severity"] = held_sev
         if report.get("dedup_decision") != "send":
             continue
         # Deterministic dedup backstop (task #66): even when the LLM says "send",

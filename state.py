@@ -10,6 +10,20 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
+# Severity hysteresis (task #66): higher rank = more severe. Used to debounce the
+# LLM flapping a store's tier on a steady incident — escalate fast, de-escalate
+# slow. A downgrade must persist this many consecutive cycles to be accepted.
+_SEV_RANK = {"P1": 3, "P2": 2, "P3": 1}
+DOWNGRADE_HOLD_CYCLES = 2
+
+
+def _sev_rank(severity: str) -> int:
+    s = (severity or "").strip().upper()
+    for prefix, rank in _SEV_RANK.items():
+        if s.startswith(prefix):
+            return rank
+    return -1
+
 
 @dataclass
 class _Active:
@@ -26,6 +40,10 @@ class _Active:
 @dataclass
 class AlertState:
     _active: dict[str, _Active] = field(default_factory=dict)
+    # Task #66 severity hysteresis: store -> (candidate_lower_severity, streak).
+    # Tracks how many consecutive cycles a downgrade has been proposed, so a
+    # flapping tier isn't accepted until it persists. See effective_severity.
+    _downgrade: dict[str, tuple[str, int]] = field(default_factory=dict)
     # Task #56 stage 1: the agent's OWN past triage.report events, read back
     # from triage-mcp's get_alert_history at startup (and refreshed per cycle in
     # later stages). Read-only context — deliberately NOT merged into _active, so
@@ -89,7 +107,38 @@ class AlertState:
             and set(report.get("domains_affected", [])) == set(prev.domains_affected)
         )
 
+    def effective_severity(self, store: str, proposed: str) -> str:
+        """Severity hysteresis (task #66): escalate fast, de-escalate slow.
+
+        Returns the severity the agent should ACT on this cycle. Escalations (or
+        an unchanged tier) apply immediately. A downgrade is HELD at the current
+        confirmed tier until the lower tier has been proposed for
+        DOWNGRADE_HOLD_CYCLES consecutive cycles — this damps the LLM flapping a
+        stable incident between e.g. P1 and P2. A store with no open alert, or an
+        unrecognized tier, is returned unchanged.
+
+        Stateful: call once per alert report per cycle (it advances the streak).
+        """
+        prev = self._active.get(store)
+        if prev is None:
+            self._downgrade.pop(store, None)
+            return proposed
+        pr, cr = _sev_rank(proposed), _sev_rank(prev.severity)
+        if pr < 0 or cr < 0 or pr >= cr:
+            # unknown tier, or escalation / unchanged — accept now, clear pending
+            self._downgrade.pop(store, None)
+            return proposed
+        # proposed is a downgrade — require it to persist before accepting
+        cand, count = self._downgrade.get(store, ("", 0))
+        count = count + 1 if cand == proposed else 1
+        if count >= DOWNGRADE_HOLD_CYCLES:
+            self._downgrade.pop(store, None)
+            return proposed
+        self._downgrade[store] = (proposed, count)
+        return prev.severity
+
     def clear(self, store: str) -> _Active | None:
+        self._downgrade.pop(store, None)
         return self._active.pop(store, None)
 
     def is_active(self, store: str) -> bool:
