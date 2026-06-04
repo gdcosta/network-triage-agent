@@ -90,6 +90,47 @@ class SplunkClient:
             )
         return rows
 
+    async def call_tool(self, arguments: dict[str, Any]) -> Any:
+        """Invoke the configured tool with arbitrary arguments and return the
+        tool's payload as-is (dict or list).
+
+        Unlike run_query, this does NOT coerce to Splunk row shape. It exists
+        for tools like triage-mcp's `get_alert_history`, whose payload is a
+        structured dict ({"events": [...], "event_count": N}) rather than the
+        {"results": [...]} envelope run_query expects. (Task #56.)
+        """
+        if self._session is None:
+            raise RuntimeError("SplunkClient not opened — use 'async with'")
+        result = await self._session.call_tool(self._tool_name, arguments=arguments)
+        if getattr(result, "isError", False):
+            raise RuntimeError(f"mcp tool error ({self._tool_name}): {result}")
+        return _extract_payload(result)
+
+
+def _extract_payload(result: Any) -> Any:
+    """Return a tool result's payload verbatim (dict/list), no row coercion.
+
+    Prefers the JSON in the text content blocks — that's the literal value the
+    tool returned, and it's what mcp-remote bridges across the stdio transport.
+    Falls back to structuredContent. Returns None if neither parses.
+    """
+    text_parts: list[str] = []
+    for block in getattr(result, "content", []) or []:
+        text = getattr(block, "text", None)
+        if text:
+            text_parts.append(text)
+    if text_parts:
+        blob = "\n".join(text_parts).strip()
+        try:
+            return json.loads(blob)
+        except json.JSONDecodeError:
+            log.warning("tool returned non-JSON content; trying structuredContent")
+
+    structured = getattr(result, "structuredContent", None)
+    if isinstance(structured, (dict, list)):
+        return structured
+    return None
+
 
 def _parse_response(result: Any) -> tuple[list[dict[str, Any]], bool, int]:
     """Pull rows + truncation metadata from an MCP CallToolResult.

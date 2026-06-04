@@ -294,10 +294,13 @@ spec:
       targetPort: mcp-sse
   type: ClusterIP
 ---
-# Cilium NetworkPolicy: only the OpenClaw chat bot pod (in kl-governance ns)
-# may reach the triage-mcp Service. Everything else is implicitly denied for
-# ingress to this pod because the policy selects it and Cilium switches to
-# default-deny once at least one policy applies.
+# Cilium NetworkPolicy: only named callers may reach the triage-mcp Service.
+# Everything else is implicitly denied for ingress to this pod because the policy
+# selects it and Cilium switches to default-deny once at least one policy applies.
+#   - kl-openclaw (kl-governance ns): the chat bot — answers "what's firing?"
+#   - kl-triage-agent (this ns): the agent reading its OWN get_alert_history at
+#     detection time (task #56). The agent's /state ingress stays bot-only
+#     (separate policy below) — this only opens the history read direction.
 apiVersion: cilium.io/v2
 kind: CiliumNetworkPolicy
 metadata:
@@ -312,6 +315,9 @@ spec:
         - matchLabels:
             io.kubernetes.pod.namespace: kl-governance
             app: kl-openclaw
+        - matchLabels:
+            io.kubernetes.pod.namespace: net-triage-agent
+            app: kl-triage-agent
       toPorts:
         - ports:
             - port: "8081"

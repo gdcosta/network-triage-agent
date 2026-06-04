@@ -26,6 +26,18 @@ class Config:
     splunk_tool_name: str
     splunk_row_limit: int
 
+    # Alert-history MCP (task #56): the agent reads its OWN past triage.report
+    # outcomes from triage-mcp's get_alert_history. Separate upstream from the
+    # Splunk data plane — a DIRECT connection to triage-mcp:8081 (governed by the
+    # agent-side inspect hook, not the sidecar proxy). Off by default so existing
+    # deploys are unaffected.
+    history_enabled: bool
+    history_mcp_command: str
+    history_mcp_args: list[str]
+    history_mcp_env: dict[str, str]
+    history_mcp_tool: str
+    history_lookback_hours: int
+
     # Teams (notification plane)
     teams_webhook_url: str
 
@@ -101,6 +113,13 @@ def load_config(mock: bool = False) -> Config:
         splunk_mcp_env=_parse_env_pairs(os.environ.get("SPLUNK_MCP_ENV", "")),
         splunk_tool_name=os.environ.get("SPLUNK_TOOL_NAME", "splunk_run_query"),
         splunk_row_limit=int(os.environ.get("SPLUNK_ROW_LIMIT", "1000")),
+        history_enabled=os.environ.get("HISTORY_ENABLED", "false").strip().lower()
+        in ("1", "true", "yes"),
+        history_mcp_command=os.environ.get("HISTORY_MCP_COMMAND", "").strip(),
+        history_mcp_args=shlex.split(os.environ.get("HISTORY_MCP_ARGS", "")),
+        history_mcp_env=_parse_env_pairs(os.environ.get("HISTORY_MCP_ENV", "")),
+        history_mcp_tool=os.environ.get("HISTORY_MCP_TOOL", "get_alert_history"),
+        history_lookback_hours=int(os.environ.get("HISTORY_LOOKBACK_HOURS", "24")),
         teams_webhook_url=webhook or "mock://stdout",
         poll_interval_seconds=int(os.environ.get("POLL_INTERVAL_SECONDS", "30")),
         earliest_time=os.environ.get("EARLIEST_TIME", "-5m"),

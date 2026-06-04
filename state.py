@@ -26,6 +26,12 @@ class _Active:
 @dataclass
 class AlertState:
     _active: dict[str, _Active] = field(default_factory=dict)
+    # Task #56 stage 1: the agent's OWN past triage.report events, read back
+    # from triage-mcp's get_alert_history at startup (and refreshed per cycle in
+    # later stages). Read-only context — deliberately NOT merged into _active, so
+    # rehydration can never resurrect an "open" alert and trigger a spurious
+    # re-post/recovery. Stage 2 feeds this to the detection/triage prompts.
+    startup_history: list[dict[str, Any]] = field(default_factory=list)
 
     def snapshot(self) -> dict[str, Any]:
         """Serializable view passed to the LLM each cycle."""

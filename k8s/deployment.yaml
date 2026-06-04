@@ -142,6 +142,24 @@ spec:
             # currently working on?" questions.
             - name: AGENT_STATE_PORT
               value: "8080"
+            # --- Task #56 stage 1: the agent reads its OWN alert history ---
+            # A SECOND MCP client, DIRECT to the triage-mcp Service (same ns),
+            # calling get_alert_history. This is separate from the bob data plane
+            # above (127.0.0.1:8788 sidecar proxy) — triage-mcp holds the linda
+            # credential and governs the resulting SPL via its own sidecar, and
+            # the agent inspects this outbound call at its own boundary
+            # (mcp_inspect → 127.0.0.1:18970). No credential lands in the agent.
+            # Cilium triage-mcp-ingress allows kl-triage-agent → triage-mcp:8081.
+            - name: HISTORY_ENABLED
+              value: "true"
+            - name: HISTORY_MCP_COMMAND
+              value: npx
+            - name: HISTORY_MCP_ARGS
+              value: "-y mcp-remote http://triage-mcp:8081/sse --allow-http"
+            - name: HISTORY_MCP_TOOL
+              value: get_alert_history
+            - name: HISTORY_LOOKBACK_HOURS
+              value: "24"
           ports:
             - name: state
               containerPort: 8080

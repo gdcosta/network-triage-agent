@@ -30,11 +30,13 @@ import os
 import signal
 import sys
 import time
+from contextlib import AsyncExitStack
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 import events
+import mcp_inspect
 import queries
 from config import Config, load_config
 from correlation import run_drills
@@ -121,6 +123,45 @@ async def _mock_poster(_url: str, card: dict) -> None:
         header=header,
         card=card,
     )
+
+
+async def _rehydrate_history(history, cfg: Config, state: AlertState) -> None:
+    """Task #56 stage 1: read the agent's OWN past triage.report outcomes back
+    from triage-mcp at startup, so a restarted pod isn't blind to recent history.
+
+    Stashes the events on state.startup_history (read-only context for stage 2);
+    deliberately does NOT mutate the open-alert set. Fail-open at every step —
+    history is enrichment, never a gate, so a triage-mcp/inspect hiccup must not
+    stop the agent from starting its loop.
+    """
+    args: dict[str, Any] = {"hours": cfg.history_lookback_hours}
+
+    # Tier #2: inspect our own outbound call at the agent boundary before it
+    # leaves the pod (triage-mcp's sidecar inspects the resulting SPL on its end).
+    verdict = await mcp_inspect.inspect_tool(cfg.history_mcp_tool, args)
+    if mcp_inspect.is_blocked(verdict):
+        events.emit("history.rehydrate_blocked", reason=verdict.get("reason"),
+                    severity=verdict.get("severity"), mode=verdict.get("mode"))
+        return
+
+    try:
+        payload = await history.call_tool(args)
+    except Exception as exc:
+        events.emit("history.rehydrate_failed",
+                    error=type(exc).__name__, message=str(exc)[:200])
+        return
+
+    if isinstance(payload, dict) and payload.get("error"):
+        events.emit("history.rehydrate_error", error=payload.get("error"),
+                    detail=str(payload.get("reason") or payload.get("detail") or "")[:200])
+        return
+
+    evts = payload.get("events", []) if isinstance(payload, dict) else []
+    state.startup_history = [e for e in evts if isinstance(e, dict)]
+    events.emit("history.rehydrated",
+                event_count=len(state.startup_history),
+                hours=cfg.history_lookback_hours,
+                inspect_mode=verdict.get("mode") or verdict.get("action"))
 
 
 async def poll_once(
@@ -414,7 +455,30 @@ async def run(mock: bool = False) -> None:
             soul_path=cfg.soul_path,
         )
 
-    async with splunk_cm as splunk:
+    async with AsyncExitStack() as stack:
+        splunk = await stack.enter_async_context(splunk_cm)
+
+        # Task #56 stage 1: optional second MCP client → triage-mcp's
+        # get_alert_history, so the agent can read its OWN past outcomes (and
+        # rehydrate after a restart). Direct connection to triage-mcp:8081,
+        # inspected at the agent boundary (mcp_inspect). Fail-open: any setup
+        # error leaves the agent running without history rather than crash-looping.
+        if cfg.history_enabled and not mock:
+            if not cfg.history_mcp_command:
+                events.emit("history.disabled", reason="HISTORY_MCP_COMMAND unset")
+            else:
+                try:
+                    history_cm = SplunkClient(
+                        cfg.history_mcp_command, cfg.history_mcp_args,
+                        cfg.history_mcp_tool, cfg.splunk_row_limit,
+                        env=cfg.history_mcp_env,
+                    )
+                    history = await stack.enter_async_context(history_cm)
+                    await _rehydrate_history(history, cfg, state)
+                except Exception as exc:
+                    events.emit("history.init_failed",
+                                error=type(exc).__name__, message=str(exc)[:200])
+
         while not stop_event.is_set():
             try:
                 await poll_once(splunk, llm, cfg, state, poster)
@@ -531,6 +595,45 @@ async def preflight() -> int:
         print(f"      ✗ {type(e).__name__}: {e}")
         failures.append("splunk")
     print()
+
+    # --- 4. Alert-history MCP (task #56) — only when enabled.
+    if cfg.history_enabled:
+        print("[+] Alert-history MCP (task #56)")
+        if not cfg.history_mcp_command:
+            print("      ✗ HISTORY_ENABLED but HISTORY_MCP_COMMAND is unset")
+            failures.append("history_unconfigured")
+        else:
+            try:
+                # Inspect-hook dry run: prove the agent-side gate is reachable.
+                verdict = await mcp_inspect.inspect_tool(
+                    cfg.history_mcp_tool, {"hours": cfg.history_lookback_hours})
+                print(f"      ✓ inspect hook → action={verdict.get('action')} "
+                      f"mode={verdict.get('mode') or '-'}")
+                async with SplunkClient(
+                    cfg.history_mcp_command, cfg.history_mcp_args,
+                    cfg.history_mcp_tool, cfg.splunk_row_limit,
+                    env=cfg.history_mcp_env,
+                ) as history:
+                    tools_result = await history._session.list_tools()
+                    tool_names = [t.name for t in tools_result.tools]
+                    if cfg.history_mcp_tool not in tool_names:
+                        print(f"      ✗ '{cfg.history_mcp_tool}' NOT exposed by triage-mcp")
+                        print(f"        available: {', '.join(tool_names)}")
+                        failures.append("history_tool_missing")
+                    else:
+                        print(f"      ✓ '{cfg.history_mcp_tool}' is exposed")
+                        payload = await history.call_tool({"hours": cfg.history_lookback_hours})
+                        if isinstance(payload, dict) and payload.get("error"):
+                            print(f"      ✗ tool returned error: {payload.get('error')}")
+                            failures.append("history_query_error")
+                        else:
+                            n = len(payload.get("events", [])) if isinstance(payload, dict) else 0
+                            print(f"      ✓ get_alert_history returned {n} event(s) "
+                                  f"over {cfg.history_lookback_hours}h")
+            except Exception as e:
+                print(f"      ✗ {type(e).__name__}: {e}")
+                failures.append("history")
+        print()
 
     if failures:
         print(f"FAILED: {len(failures)} check(s) failed: {', '.join(failures)}")
