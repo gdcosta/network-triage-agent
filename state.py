@@ -66,6 +66,29 @@ class AlertState:
             last_sent=now,
         )
 
+    def is_unchanged(self, report: dict[str, Any]) -> bool:
+        """Deterministic dedup backstop (task #66).
+
+        True if `report` matches the store's last-sent card on the dedup key —
+        (severity, scope, root_cause_key) plus the set of domains_affected. Used
+        in main.py to suppress a re-send even when the LLM sets
+        dedup_decision="send", so an unchanged incident can't be spammed no
+        matter how the model rationalizes it. Mirrors the same-cycle recovery
+        guard (guard B): trust durable state over the LLM's momentary judgment.
+
+        Returns False when the store has no open alert (first detection) — that
+        is never a duplicate.
+        """
+        prev = self._active.get(report.get("store", ""))
+        if prev is None:
+            return False
+        return (
+            report.get("severity") == prev.severity
+            and report.get("scope") == prev.scope
+            and report.get("root_cause_key") == prev.root_cause_key
+            and set(report.get("domains_affected", [])) == set(prev.domains_affected)
+        )
+
     def clear(self, store: str) -> _Active | None:
         return self._active.pop(store, None)
 

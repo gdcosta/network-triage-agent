@@ -258,7 +258,37 @@ async def poll_once(
         )
         if report.get("action") != "alert":
             continue
+        # An alert card must carry a real severity tier (P1/P2/P3). The triage LLM
+        # sometimes emits severity="RESOLVED" on the ALERT path during a store's
+        # recovery transition (observed 2026-06-03 on 418/047). A real recovery
+        # must come through the recovery path (recovery_stores -> recovery.posted),
+        # never as an alert card — so suppress non-tier severities to stop a
+        # premature "RESOLVED" leaking out the alert channel. (Task #66.)
+        sev = (report.get("severity") or "").strip().upper()
+        if not sev.startswith(("P1", "P2", "P3")):
+            events.emit(
+                "triage.nonalert_suppressed",
+                store=report.get("store"),
+                severity=report.get("severity"),
+                reason="not_a_p_tier",
+            )
+            continue
         if report.get("dedup_decision") != "send":
+            continue
+        # Deterministic dedup backstop (task #66): even when the LLM says "send",
+        # suppress a card whose (severity, scope, root_cause_key, domains_affected)
+        # all match the store's last-sent state. Model-proof — Haiku cannot spam an
+        # unchanged incident no matter how it rationalizes the re-send. SOUL.md
+        # tightening reduces the rate; this makes it airtight. Mirrors guard B.
+        if state.is_unchanged(report):
+            events.emit(
+                "triage.dedup_suppressed",
+                store=report.get("store"),
+                severity=report.get("severity"),
+                scope=report.get("scope"),
+                root_cause=report.get("root_cause_key"),
+                llm_decision=report.get("dedup_decision"),
+            )
             continue
         # Override LLM-supplied site with the literal value from logs
         # so store_name is deterministic, not inferred.
