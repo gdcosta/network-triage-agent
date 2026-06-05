@@ -105,6 +105,19 @@ def build_card(
         }],
     })
 
+    # Task #56 stage 3: surface recurrence to the on-call. Set deterministically
+    # in main.py from the agent's own alert history (only when genuinely
+    # recurring), so the NOC sees "this has happened before" without reading the
+    # reasoning text.
+    if report.get("recurrence_note"):
+        body.append({
+            "type": "Container", "separator": True, "style": "accent",
+            "items": [
+                {"type": "TextBlock", "weight": "Bolder", "text": "⟳ Recurring Pattern"},
+                {"type": "TextBlock", "wrap": True, "text": report["recurrence_note"]},
+            ],
+        })
+
     domain_summaries = report.get("domain_summaries") or {}
     if domain_summaries:
         body.append({

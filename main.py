@@ -291,6 +291,7 @@ async def poll_once(
         scan_data=scan_data,
         drill_data=drill_data,
         previous_alerts=previous_alerts,
+        recurrence=recurrence or None,
     )
 
     # 6. Post alert cards according to LLM dedup verdict
@@ -311,12 +312,6 @@ async def poll_once(
         )
         if report.get("action") != "alert":
             continue
-        # An alert card must carry a real severity tier (P1/P2/P3). The triage LLM
-        # sometimes emits severity="RESOLVED" on the ALERT path during a store's
-        # recovery transition (observed 2026-06-03 on 418/047). A real recovery
-        # must come through the recovery path (recovery_stores -> recovery.posted),
-        # never as an alert card — so suppress non-tier severities to stop a
-        # premature "RESOLVED" leaking out the alert channel. (Task #66.)
         # An alert card must carry a real severity tier (P1/P2/P3). The triage LLM
         # sometimes emits severity="RESOLVED" on the ALERT path during a store's
         # recovery transition (observed 2026-06-03 on 418/047). A real recovery
@@ -389,6 +384,17 @@ async def poll_once(
         log_city = _city_from_scans(report.get("store", ""), scan_data)
         if log_city:
             report["site"] = log_city
+        # Task #56 stage 3: surface recurrence on the card — deterministic, from
+        # the agent's own alert history (not the LLM's phrasing). Only when
+        # genuinely recurring (>=2 prior alerts for this store).
+        rec = recurrence.get(report.get("store", "")) if recurrence else None
+        if rec and rec.get("alerts", 0) >= 2:
+            days = max(1, int(rec.get("window_hours") or 168) // 24)
+            cause = rec.get("common_root_cause") or "similar"
+            report["recurrence_note"] = (
+                f"{rec['alerts']} prior {cause} alert(s) on this store in the "
+                f"last {days}d — recurring issue."
+            )
         try:
             card = build_card(
             report, cfg.splunk_base_url, cfg.meraki_base_url, cfg.store_names,

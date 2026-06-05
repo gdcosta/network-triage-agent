@@ -235,8 +235,9 @@ class LLMClient:
         scan_data: dict[str, list[dict]],
         drill_data: dict[str, dict[str, list[dict]]],
         previous_alerts: dict[str, Any],
+        recurrence: dict[str, Any] | None = None,
     ) -> TriageReports:
-        user_msg = _triage_prompt(scan_data, drill_data, previous_alerts)
+        user_msg = _triage_prompt(scan_data, drill_data, previous_alerts, recurrence)
         result = await self._call(
             user_text=user_msg,
             tool=TRIAGE_TOOL,
@@ -335,6 +336,7 @@ def _triage_prompt(
     scan_data: dict[str, list[dict]],
     drill_data: dict[str, dict[str, list[dict]]],
     previous_alerts: dict[str, Any],
+    recurrence: dict[str, Any] | None = None,
 ) -> str:
     parts = [
         "PHASE: triage\n\n"
@@ -349,6 +351,21 @@ def _triage_prompt(
         f"\n## scan_summary (carry-forward context)\n```json\n"
         f"{json.dumps({k: len(v) for k, v in scan_data.items()}, indent=2)}\n```\n"
     )
+    # Task #56 stage 3: prior-alert recurrence for the stores being triaged, so
+    # the report's confidence / severity / notes can weight a recurring vs a novel
+    # store. Scoped to the drilled stores (relevance + tokens). Apply the SOUL.md
+    # "PRIOR ALERT HISTORY" rules.
+    relevant = {s: recurrence[s] for s in drill_data if recurrence and s in recurrence}
+    if relevant:
+        parts.append(
+            "\n## prior_alert_history — recurrence for these stores (the agent's "
+            "OWN past alerts)\n"
+            "Apply the SOUL.md PRIOR ALERT HISTORY rules: a recurring store with "
+            "the same root cause confirms the pattern (raise confidence; note it "
+            "in the card); a repeatedly-seen ISP/external cause is a known issue, "
+            "not a new store fault.\n```json\n"
+            f"{json.dumps(relevant, indent=2, default=str)}\n```\n"
+        )
     for store, drills in drill_data.items():
         parts.append(f"\n## drill_results for store {store}\n")
         for kind, rows in drills.items():
