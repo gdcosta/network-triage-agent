@@ -205,8 +205,9 @@ class LLMClient:
         self,
         scan_data: dict[str, list[dict]],
         previous_alerts: dict[str, Any],
+        recurrence: dict[str, Any] | None = None,
     ) -> DetectionDecision:
-        user_msg = _detection_prompt(scan_data, previous_alerts)
+        user_msg = _detection_prompt(scan_data, previous_alerts, recurrence)
         result = await self._call(
             user_text=user_msg,
             tool=DETECTION_TOOL,
@@ -295,7 +296,23 @@ class LLMClient:
 def _detection_prompt(
     scan_data: dict[str, list[dict]],
     previous_alerts: dict[str, Any],
+    recurrence: dict[str, Any] | None = None,
 ) -> str:
+    # Task #56 stage 2: compact per-store recurrence context from the agent's OWN
+    # past alerts. PRIOR context only — the scans below still decide what's firing
+    # NOW; this just lets the model weight a recurring/known store vs a novel one.
+    recurrence_block = ""
+    if recurrence:
+        recurrence_block = (
+            "## prior_alert_history — recurrence context (the agent's OWN past "
+            "alerts per store, last N days)\n"
+            "Treat as PRIOR context, NOT a trigger: a store that has alerted "
+            "repeatedly with the same root cause is a recurring/known issue "
+            "(raise confidence, note the pattern); a store with little/no history "
+            "that suddenly alerts is novel. Only the scans below decide whether "
+            "something is firing right now.\n```json\n"
+            f"{json.dumps(recurrence, indent=2, default=str)}\n```\n\n"
+        )
     return (
         "PHASE: detection\n\n"
         "Below are the raw results of the 4 scan SPL queries you defined "
@@ -306,6 +323,7 @@ def _detection_prompt(
         "Call the detection_decision tool with your decision.\n\n"
         f"## previous_alerts (open alerts as of last poll)\n```json\n"
         f"{json.dumps(previous_alerts, indent=2, default=str)}\n```\n\n"
+        f"{recurrence_block}"
         f"## scan_sdwan\n```json\n{json.dumps(scan_data.get('sdwan', []), indent=2, default=str)}\n```\n\n"
         f"## scan_te\n```json\n{json.dumps(scan_data.get('te', []), indent=2, default=str)}\n```\n\n"
         f"## scan_meraki\n```json\n{json.dumps(scan_data.get('meraki', []), indent=2, default=str)}\n```\n\n"

@@ -158,8 +158,13 @@ spec:
               value: "-y mcp-remote http://triage-mcp:8081/sse --allow-http"
             - name: HISTORY_MCP_TOOL
               value: get_alert_history
+            # 7-day window for recurrence context (#56 stage 2); capped by
+            # k8s_ws_logs retention, so you get whatever's available.
             - name: HISTORY_LOOKBACK_HOURS
-              value: "24"
+              value: "168"
+            # Re-fetch history this often so the recurrence summary stays current.
+            - name: HISTORY_REFRESH_SECONDS
+              value: "600"
           ports:
             - name: state
               containerPort: 8080

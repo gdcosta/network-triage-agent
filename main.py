@@ -125,14 +125,18 @@ async def _mock_poster(_url: str, card: dict) -> None:
     )
 
 
-async def _rehydrate_history(history, cfg: Config, state: AlertState) -> None:
-    """Task #56 stage 1: read the agent's OWN past triage.report outcomes back
-    from triage-mcp at startup, so a restarted pod isn't blind to recent history.
+async def _rehydrate_history(
+    history, cfg: Config, state: AlertState, kind: str = "startup"
+) -> None:
+    """Task #56: read the agent's OWN past triage.report outcomes back from
+    triage-mcp and stash them on state.startup_history.
 
-    Stashes the events on state.startup_history (read-only context for stage 2);
-    deliberately does NOT mutate the open-alert set. Fail-open at every step —
-    history is enrichment, never a gate, so a triage-mcp/inspect hiccup must not
-    stop the agent from starting its loop.
+    Called once at startup (kind="startup", so a restarted pod isn't blind) and
+    then periodically (kind="refresh") so the recurrence context fed to the
+    detection prompt (stage 2) stays current. Read-only context — deliberately
+    does NOT mutate the open-alert set. Fail-open at every step: history is
+    enrichment, never a gate, so a triage-mcp/inspect hiccup must not stop the
+    loop (a failed refresh just keeps the previous snapshot).
     """
     args: dict[str, Any] = {"hours": cfg.history_lookback_hours}
 
@@ -159,9 +163,48 @@ async def _rehydrate_history(history, cfg: Config, state: AlertState) -> None:
     evts = payload.get("events", []) if isinstance(payload, dict) else []
     state.startup_history = [e for e in evts if isinstance(e, dict)]
     events.emit("history.rehydrated",
+                kind=kind,
                 event_count=len(state.startup_history),
                 hours=cfg.history_lookback_hours,
                 inspect_mode=verdict.get("mode") or verdict.get("action"))
+
+
+def _recurrence_summary(events: list[dict], window_hours: int) -> dict[str, Any]:
+    """Task #56 stage 2: compact per-store recurrence view from the agent's own
+    past alerts, fed to the detection prompt so the model can weight a recurring
+    store vs a novel one. Counts only genuine alert events (P-tier severity);
+    RESOLVED/other markers are skipped. Cheap — runs off the in-memory snapshot.
+    """
+    by_store: dict[str, dict[str, Any]] = {}
+    for ev in events:
+        if not isinstance(ev, dict):
+            continue
+        store = ev.get("store")
+        sev = (ev.get("severity") or "").strip().upper()
+        if not store or not sev.startswith(("P1", "P2", "P3")):
+            continue
+        s = by_store.setdefault(
+            store, {"alerts": 0, "root_causes": [], "last_ts": None, "last_root_cause": None}
+        )
+        s["alerts"] += 1
+        rc = ev.get("root_cause")
+        if rc:
+            s["root_causes"].append(rc)
+        ts = ev.get("ts")
+        if ts and (s["last_ts"] is None or str(ts) > str(s["last_ts"])):
+            s["last_ts"] = ts
+            s["last_root_cause"] = rc
+    out: dict[str, Any] = {}
+    for store, s in by_store.items():
+        rcs = s["root_causes"]
+        out[store] = {
+            "alerts": s["alerts"],
+            "last_root_cause": s["last_root_cause"],
+            "common_root_cause": max(set(rcs), key=rcs.count) if rcs else None,
+            "last_seen": s["last_ts"],
+            "window_hours": window_hours,
+        }
+    return out
 
 
 async def poll_once(
@@ -191,15 +234,25 @@ async def poll_once(
 
     previous_alerts = state.snapshot()
 
+    # Task #56 stage 2: compact per-store recurrence context from the agent's own
+    # past alerts (state.startup_history, refreshed periodically in run()). Built
+    # off the in-memory snapshot each cycle — no MCP call here. Empty {} when
+    # history is disabled/unavailable, in which case the prompt block is omitted.
+    recurrence = _recurrence_summary(state.startup_history, cfg.history_lookback_hours)
+
     # 2. Detection pass
     decision = await llm.detection_pass(
         scan_data=scan_data, previous_alerts=previous_alerts,
+        recurrence=recurrence or None,
     )
     events.emit(
         "detection.decision",
         summary=decision.summary,
         correlate=[s.get("store") for s in decision.correlate_stores],
         recoveries=[s.get("store") for s in decision.recovery_stores],
+        # Stage 2: which stores carried recurrence context into this decision
+        # (confirms the history is being built + fed to the prompt).
+        recurrence_stores=sorted(recurrence) if recurrence else [],
     )
 
     # 3. Recovery cards
@@ -547,6 +600,7 @@ async def run(mock: bool = False) -> None:
 
     async with AsyncExitStack() as stack:
         splunk = await stack.enter_async_context(splunk_cm)
+        history = None  # set below if history is enabled; used for periodic refresh
 
         # Task #56 stage 1: optional second MCP client → triage-mcp's
         # get_alert_history, so the agent can read its OWN past outcomes (and
@@ -569,7 +623,15 @@ async def run(mock: bool = False) -> None:
                     events.emit("history.init_failed",
                                 error=type(exc).__name__, message=str(exc)[:200])
 
+        last_history_refresh = time.monotonic()
         while not stop_event.is_set():
+            # Task #56 stage 2: periodically refresh the recurrence snapshot so it
+            # doesn't go stale on a long-running pod. Cheap — every N minutes, not
+            # per cycle; a failed refresh keeps the previous snapshot (fail-open).
+            if (history is not None
+                    and time.monotonic() - last_history_refresh >= cfg.history_refresh_seconds):
+                await _rehydrate_history(history, cfg, state, kind="refresh")
+                last_history_refresh = time.monotonic()
             try:
                 await poll_once(splunk, llm, cfg, state, poster)
             except Exception as exc:
