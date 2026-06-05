@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import sys
 from contextlib import AsyncExitStack
 from typing import Any
 
@@ -50,7 +51,24 @@ class SplunkClient:
 
     async def __aenter__(self) -> "SplunkClient":
         self._stack = AsyncExitStack()
-        read, write = await self._stack.enter_async_context(stdio_client(self._params))
+        # mcp-remote logs its request headers — including the `Authorization:
+        # Bearer <token>` line — to stderr, which the container captures into
+        # k8s_ws_logs: a credential leak (task #67). Discard the subprocess's
+        # stderr by default; set SPLUNK_MCP_DEBUG_STDERR=1 to restore it for
+        # connection debugging. (mcp's stdout is the protocol channel, consumed
+        # by the SDK, so it never reaches the logs.)
+        if os.environ.get("SPLUNK_MCP_DEBUG_STDERR", "").strip().lower() in ("1", "true", "yes"):
+            errlog = sys.stderr
+        else:
+            errlog = self._stack.enter_context(open(os.devnull, "w"))
+        try:
+            cm = stdio_client(self._params, errlog=errlog)
+        except TypeError:
+            # mcp build without the errlog param — fall back so the data plane
+            # never breaks (the token leak would persist in that case; logged).
+            log.warning("stdio_client has no errlog param; mcp-remote stderr not suppressed")
+            cm = stdio_client(self._params)
+        read, write = await self._stack.enter_async_context(cm)
         self._session = await self._stack.enter_async_context(ClientSession(read, write))
         await self._session.initialize()
         return self
