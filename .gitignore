@@ -12,6 +12,10 @@ store_registry.json
 # real one with credentials is not.
 k8s/secret.yaml
 
+# Egress CiliumNetworkPolicy with real internal IPs + Power Automate webhook
+# host (task #61). The .example template is committed; the real one is not.
+k8s/cilium-egress-policy.yaml
+
 # Python
 __pycache__/
 *.py[cod]

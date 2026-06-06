@@ -1,0 +1,139 @@
+# TEMPLATE — do not commit a filled-in copy of this file.
+#
+# Copy to cilium-egress-policy.yaml (gitignored), replace the <PLACEHOLDERS>
+# with your real internal IPs + Power Automate webhook host, then:
+#   kubectl apply -f k8s/cilium-egress-policy.yaml
+#
+# Egress CiliumNetworkPolicies for the net-triage-agent namespace (task #61).
+# Before this, the namespace had only INGRESS policies — the agent + triage-mcp
+# had unrestricted egress. These two policies make each workload default-DENY
+# egress and allow only what it actually needs.
+#
+# Scoping is per-POD (app label), not per-container: the triage-agent app and
+# its DefenseClaw sidecar share one pod network namespace, so Cilium cannot tell
+# them apart. "Anthropic egress on the sidecar, not the agent container" (the #61
+# note) is therefore enforced at pod granularity — only the kl-triage-agent pod
+# (which contains the sidecar) may reach Anthropic; triage-mcp may not.
+#
+# IMPORTANT: selecting a pod for egress flips it to default-deny egress, which
+# includes DNS — so each policy MUST include the kube-dns rule or all name
+# resolution breaks. kl-scenario-controller is intentionally NOT selected by
+# either policy, so it stays default-allow.
+#
+# Placeholders:
+#   <BOB_INTERNAL_IP>     — internal IP of the bob Splunk box (retail telemetry)
+#   <LINDA_INTERNAL_IP>   — internal IP of the linda Splunk box (k8s_ws_logs + HEC)
+#   <POWER_AUTOMATE_HOST> — the host of your Teams incoming-webhook URL, e.g.
+#                           default<env-id>.<region>.environment.api.powerplatform.com
+#
+# Rollback: kubectl delete ciliumnetworkpolicy kl-triage-agent-egress triage-mcp-egress -n net-triage-agent
+---
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: kl-triage-agent-egress
+  namespace: net-triage-agent
+spec:
+  endpointSelector:
+    matchLabels:
+      app: kl-triage-agent
+  egress:
+    # DNS — required for the toFQDNs rules below AND for resolving the
+    # triage-mcp service name. The dns proxy rule lets Cilium learn the IPs
+    # that the toFQDNs allow-list then permits.
+    - toEndpoints:
+        - matchLabels:
+            io.kubernetes.pod.namespace: kube-system
+            k8s-app: kube-dns
+      toPorts:
+        - ports:
+            - port: "53"
+              protocol: ANY
+          rules:
+            dns:
+              - matchPattern: "*"
+    # Anthropic — the DefenseClaw sidecar forwards the agent's LLM calls here
+    # (the agent container itself only talks to the sidecar over loopback).
+    - toFQDNs:
+        - matchName: api.anthropic.com
+      toPorts:
+        - ports:
+            - port: "443"
+              protocol: TCP
+    # Teams card posting — agent → Power Automate incoming webhook.
+    # Exact host + same-domain wildcard so a webhook rotation in the same
+    # Power Platform environment doesn't require a policy edit.
+    - toFQDNs:
+        - matchName: <POWER_AUTOMATE_HOST>
+        - matchPattern: "*.environment.api.powerplatform.com"
+      toPorts:
+        - ports:
+            - port: "443"
+              protocol: TCP
+    # bob Splunk MCP — the sidecar's mcp-remote proxy upstream (retail telemetry)
+    - toCIDR:
+        - <BOB_INTERNAL_IP>/32
+      toPorts:
+        - ports:
+            - port: "8089"
+              protocol: TCP
+    # linda HEC — DefenseClaw audit sink (#39) + in-sidecar health probe (#64)
+    - toCIDR:
+        - <LINDA_INTERNAL_IP>/32
+      toPorts:
+        - ports:
+            - port: "8088"
+              protocol: TCP
+    # triage-mcp — agent reads its own alert history for recurrence (#56)
+    - toEndpoints:
+        - matchLabels:
+            io.kubernetes.pod.namespace: net-triage-agent
+            app: triage-mcp
+      toPorts:
+        - ports:
+            - port: "8081"
+              protocol: TCP
+---
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: triage-mcp-egress
+  namespace: net-triage-agent
+spec:
+  endpointSelector:
+    matchLabels:
+      app: triage-mcp
+  egress:
+    # DNS — for resolving the kl-triage-agent /state service name.
+    - toEndpoints:
+        - matchLabels:
+            io.kubernetes.pod.namespace: kube-system
+            k8s-app: kube-dns
+      toPorts:
+        - ports:
+            - port: "53"
+              protocol: ANY
+          rules:
+            dns:
+              - matchPattern: "*"
+    # linda — Splunk MCP query for get_alert_history (:8089, triage-mcp itself)
+    # + HEC audit/health from its DefenseClaw sidecar (:8088). Same host.
+    # NOTE: no Anthropic, no bob — triage-mcp makes no LLM calls and never
+    # touches bob; this is strictly tighter than the agent pod.
+    - toCIDR:
+        - <LINDA_INTERNAL_IP>/32
+      toPorts:
+        - ports:
+            - port: "8089"
+              protocol: TCP
+            - port: "8088"
+              protocol: TCP
+    # agent /state — triage-mcp pulls the agent's live state to serve the bot
+    - toEndpoints:
+        - matchLabels:
+            io.kubernetes.pod.namespace: net-triage-agent
+            app: kl-triage-agent
+      toPorts:
+        - ports:
+            - port: "8080"
+              protocol: TCP
