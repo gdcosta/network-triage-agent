@@ -16,8 +16,10 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import sys
-from contextlib import AsyncExitStack
+import threading
+from contextlib import AsyncExitStack, contextmanager
 from typing import Any
 
 from mcp import ClientSession, StdioServerParameters
@@ -26,6 +28,54 @@ from mcp.client.stdio import stdio_client
 import events
 
 log = logging.getLogger(__name__)
+
+# mcp-remote prints its request headers — including `Authorization: Bearer
+# <token>` — to stderr, which the container captures into k8s_ws_logs: a
+# credential leak (task #67). The token only ever appears next to "Bearer ",
+# so we mask that and keep the rest of the stream for debugging.
+_BEARER_RE = re.compile(r"""(Bearer\s+)[^\s"']+""", re.IGNORECASE)
+
+
+@contextmanager
+def _stderr_sink():
+    """Yield a writable file object to hand to `stdio_client(errlog=...)`.
+
+    Pipes the mcp-remote subprocess's stderr through a reader thread that
+    masks the bearer token and forwards every other line to the real stderr —
+    so connection/transport diagnostics survive without leaking the credential
+    into the logs (task #67). Set SPLUNK_MCP_DEBUG_STDERR=1 to bypass redaction
+    and pass raw stderr through (debug only — re-exposes the token).
+    """
+    if os.environ.get("SPLUNK_MCP_DEBUG_STDERR", "").strip().lower() in ("1", "true", "yes"):
+        yield sys.stderr
+        return
+
+    read_fd, write_fd = os.pipe()
+    # The child writes to this fd; we hold it only to expose fileno() to the
+    # subprocess and to close our copy on exit so the reader sees EOF.
+    write_file = os.fdopen(write_fd, "w", buffering=1, encoding="utf-8", errors="replace")
+
+    def _pump() -> None:
+        with os.fdopen(read_fd, "r", encoding="utf-8", errors="replace") as reader:
+            for line in reader:
+                try:
+                    sys.stderr.write(_BEARER_RE.sub(r"\1<REDACTED>", line))
+                    sys.stderr.flush()
+                except Exception:
+                    break
+
+    thread = threading.Thread(target=_pump, name="mcp-stderr-redact", daemon=True)
+    thread.start()
+    try:
+        yield write_file
+    finally:
+        # Close our write end so the child's exit drives the pipe to EOF and
+        # the pump thread can finish; bounded join so cleanup never hangs.
+        try:
+            write_file.close()
+        except Exception:
+            pass
+        thread.join(timeout=2.0)
 
 
 class SplunkClient:
@@ -51,22 +101,17 @@ class SplunkClient:
 
     async def __aenter__(self) -> "SplunkClient":
         self._stack = AsyncExitStack()
-        # mcp-remote logs its request headers — including the `Authorization:
-        # Bearer <token>` line — to stderr, which the container captures into
-        # k8s_ws_logs: a credential leak (task #67). Discard the subprocess's
-        # stderr by default; set SPLUNK_MCP_DEBUG_STDERR=1 to restore it for
-        # connection debugging. (mcp's stdout is the protocol channel, consumed
-        # by the SDK, so it never reaches the logs.)
-        if os.environ.get("SPLUNK_MCP_DEBUG_STDERR", "").strip().lower() in ("1", "true", "yes"):
-            errlog = sys.stderr
-        else:
-            errlog = self._stack.enter_context(open(os.devnull, "w"))
+        # Route the mcp-remote subprocess's stderr through a redacting
+        # passthrough so the `Authorization: Bearer <token>` line is masked
+        # but the rest of the stream still reaches the logs (task #67). The
+        # sink is entered before the transport so it tears down after it.
+        errlog = self._stack.enter_context(_stderr_sink())
         try:
             cm = stdio_client(self._params, errlog=errlog)
         except TypeError:
             # mcp build without the errlog param — fall back so the data plane
-            # never breaks (the token leak would persist in that case; logged).
-            log.warning("stdio_client has no errlog param; mcp-remote stderr not suppressed")
+            # never breaks (stderr is unredacted in that case; logged).
+            log.warning("stdio_client has no errlog param; mcp-remote stderr not redacted")
             cm = stdio_client(self._params)
         read, write = await self._stack.enter_async_context(cm)
         self._session = await self._stack.enter_async_context(ClientSession(read, write))
