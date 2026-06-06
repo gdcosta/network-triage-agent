@@ -20,6 +20,7 @@ from __future__ import annotations
 import contextvars
 import json
 import logging
+import re
 import sys
 import uuid
 from datetime import datetime, timezone
@@ -68,12 +69,37 @@ def emit_decision(event: str, decided: Any, rationale: str, inputs: dict[str, An
     emit(event, decided=decided, rationale=rationale, inputs=inputs, **extra)
 
 
+# Secrets that leak into third-party log messages. httpx logs full request
+# URLs at INFO — and the Teams (Power Automate) webhook URL carries a `sig=`
+# HMAC that authorizes posting (a credential). Mask it, plus any bearer /
+# api-key that ever lands in a logged message, at this single formatter
+# chokepoint so nothing reaches the JSONL stream / linda. Same class of fix as
+# the mcp-remote bearer leak (task #67); masking the value (not the whole line)
+# keeps the host/path/status useful for debugging.
+_REDACT_RE = re.compile(
+    r"""(?ix)
+    ( \bsig=                 # Azure/Power Automate SAS signature
+    | bearer\s+              # bearer tokens
+    | x-api-key[=:]\s*       # Anthropic-style api key header
+    | api[_-]?key[=:]\s*
+    )
+    ([^&\s"']+)
+    """
+)
+
+
+def _redact(text: str) -> str:
+    return _REDACT_RE.sub(r"\1<REDACTED>", text)
+
+
 class _JSONFormatter(logging.Formatter):
     """Render logging.LogRecord as a JSONL event on the same schema as emit().
 
     Captures third-party logger output (httpx, mcp, asyncio) and our own
     log.exception tracebacks into the structured stream so the OTel
-    collector sees a single uniform JSON line format.
+    collector sees a single uniform JSON line format. Secrets that leak into
+    message text (e.g. the webhook `sig=` in httpx's request URL) are masked
+    via _redact before they reach stdout.
     """
 
     def format(self, record: logging.LogRecord) -> str:
@@ -82,7 +108,7 @@ class _JSONFormatter(logging.Formatter):
             "event": "log",
             "level": record.levelname,
             "logger": record.name,
-            "message": record.getMessage(),
+            "message": _redact(record.getMessage()),
         }
         cid = _cycle_id.get()
         if cid:
@@ -91,8 +117,8 @@ class _JSONFormatter(logging.Formatter):
             exc_type, exc_val, _ = record.exc_info
             payload["exception"] = {
                 "type": exc_type.__name__ if exc_type else None,
-                "message": str(exc_val) if exc_val else None,
-                "traceback": self.formatException(record.exc_info),
+                "message": _redact(str(exc_val)) if exc_val else None,
+                "traceback": _redact(self.formatException(record.exc_info)),
             }
         return json.dumps(payload, default=str, separators=(",", ":"))
 
