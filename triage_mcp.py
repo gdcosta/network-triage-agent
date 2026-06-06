@@ -604,6 +604,57 @@ async def get_alert_history(store_id: str | None = None, hours: int = 24) -> dic
     }
 
 
+@mcp.tool()
+async def record_feedback(
+    rating: str,
+    comment: str = "",
+    store_id: str = "",
+    about: str = "",
+) -> dict[str, Any]:
+    """Record a user's feedback on a triage answer you gave (the learning signal, task #57).
+
+    Call this whenever the user reacts to one of your triage/diagnosis answers
+    with approval or disapproval — e.g. "that's right / good catch / 👍",
+    "that's wrong / unhelpful / 👎", "the severity was off", "you missed the ISE
+    issue". This is the ONLY way that signal is captured for the team to learn
+    from, so don't skip it when a user clearly rates an answer.
+
+    Do NOT call it for ordinary questions, greetings, or thanks-without-judgment
+    ("thanks", "ok") — only when the user is actually rating an answer's quality.
+
+    Args:
+      rating: "positive" (approval / 👍) or "negative" (disapproval / 👎).
+      comment: the user's verbatim reason, if they gave one (free text).
+      store_id: the store the answer was about, if identifiable (e.g. "047").
+      about: short note on what the feedback concerns (e.g. "severity",
+        "root cause", "missed signal").
+
+    Returns:
+      {"recorded": true, "rating": "positive"|"negative"|"unknown"}
+    """
+    raw = (rating or "").strip().lower()
+    if raw in ("positive", "up", "thumbs_up", "thumbsup", "good", "+1", "👍"):
+        norm = "positive"
+    elif raw in ("negative", "down", "thumbs_down", "thumbsdown", "bad", "-1", "👎"):
+        norm = "negative"
+    else:
+        norm = "unknown"
+    # Emitted to this MCP server's stdout → OTel → linda k8s_ws_logs
+    # (sourcetype=kube:container:triage-mcp). The bot's call is also audited by
+    # its DefenseClaw plugin, so the feedback is governed + attributable.
+    events.emit(
+        "bot.feedback",
+        source="chat_tool",
+        rating=norm,
+        rating_raw=rating,
+        comment=comment or None,
+        has_comment=bool(comment),
+        store_id=store_id or None,
+        about=about or None,
+    )
+    return {"recorded": True, "rating": norm}
+
+
 # ---------------------------- main ---------------------------------------
 
 def main() -> None:
