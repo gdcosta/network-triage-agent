@@ -610,6 +610,8 @@ async def record_feedback(
     comment: str = "",
     store_id: str = "",
     about: str = "",
+    answer_excerpt: str = "",
+    conversation_id: str = "",
 ) -> dict[str, Any]:
     """Record a user's feedback on a triage answer you gave (the learning signal, task #57).
 
@@ -628,6 +630,13 @@ async def record_feedback(
       store_id: the store the answer was about, if identifiable (e.g. "047").
       about: short note on what the feedback concerns (e.g. "severity",
         "root cause", "missed signal").
+      answer_excerpt: a short verbatim quote or tight summary of YOUR answer
+        that is being rated — so the feedback can be correlated to what was said
+        (e.g. "Store 047 is P1 CRITICAL, MPLS primary down…"). Always provide
+        this; you know your own immediately-preceding answer.
+      conversation_id: the Teams conversation id, IF you can see it in your
+        context (best-effort, for thread grouping). Leave empty if unsure —
+        never guess one.
 
     Returns:
       {"recorded": true, "rating": "positive"|"negative"|"unknown"}
@@ -642,15 +651,19 @@ async def record_feedback(
     # Emitted to this MCP server's stdout → OTel → linda k8s_ws_logs
     # (sourcetype=kube:container:triage-mcp). The bot's call is also audited by
     # its DefenseClaw plugin, so the feedback is governed + attributable.
+    # answer_excerpt is the practical correlation key (the tool path can't see a
+    # Bot Framework messageId); conversation_id is best-effort thread grouping.
     events.emit(
         "bot.feedback",
-        source="chat_tool",
+        feedback_source="chat_tool",  # NOT "source" — collides with Splunk's reserved metadata field
         rating=norm,
         rating_raw=rating,
         comment=comment or None,
         has_comment=bool(comment),
         store_id=store_id or None,
         about=about or None,
+        answer_excerpt=answer_excerpt or None,
+        conversation_id=conversation_id or None,
     )
     return {"recorded": True, "rating": norm}
 
