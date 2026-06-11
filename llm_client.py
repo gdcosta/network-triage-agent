@@ -214,6 +214,7 @@ class LLMClient:
         )
         events.emit(
             "llm.detection_pass",
+            model=self._model,
             input_tokens=result["usage"]["input_tokens"],
             output_tokens=result["usage"]["output_tokens"],
             cache_read=result["usage"].get("cache_read_input_tokens", 0),
@@ -244,6 +245,7 @@ class LLMClient:
         )
         events.emit(
             "llm.triage_pass",
+            model=self._model,
             input_tokens=result["usage"]["input_tokens"],
             output_tokens=result["usage"]["output_tokens"],
             cache_read=result["usage"].get("cache_read_input_tokens", 0),
