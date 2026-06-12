@@ -70,11 +70,22 @@ spec:
               chown -R 10002:10002 /defenseclaw-state
               echo "ownership fixed"
               ls -la /defenseclaw-state
+              # Task #69a: the usage-spool emptyDir (medium: Memory) is a tmpfs
+              # mounted 1777 (world-writable + STICKY) like /tmp. The agent (uid
+              # 10001) writes the spool files; the sidecar (uid 10002) drains +
+              # deletes them — but the sticky bit forbids deleting another
+              # user's files, so the relay re-POSTs the same files forever
+              # (duplicate usage events). chmod 0777 clears the sticky bit so the
+              # sidecar can unlink the agent's files. Both uids stay non-root.
+              chmod 0777 /usage-spool
+              echo "usage-spool sticky bit cleared"; ls -ld /usage-spool
           securityContext:
             runAsUser: 0      # needs root to chown
           volumeMounts:
             - name: defenseclaw-state
               mountPath: /defenseclaw-state
+            - name: usage-spool
+              mountPath: /usage-spool
       containers:
         - name: triage-agent
           image: localhost:5000/kl-triage-agent:latest
@@ -165,6 +176,13 @@ spec:
             # Re-fetch history this often so the recurrence summary stays current.
             - name: HISTORY_REFRESH_SECONDS
               value: "600"
+            # Task #69a: durable token-usage capture. The agent drops one JSON
+            # file per usage event into this shared spool; the sidecar drains it
+            # to linda HEC. The agent holds NO HEC/Splunk credential — the
+            # sidecar (sole linda egress) does the POST. Unset this to fall back
+            # to stdout-only (lossy filelog) capture.
+            - name: USAGE_SPOOL_DIR
+              value: /var/run/usage
           ports:
             - name: state
               containerPort: 8080
@@ -180,6 +198,10 @@ spec:
             - name: sidecar-identity
               mountPath: /var/run/sidecar-identity
               readOnly: true
+            # Task #69a: writable spool the agent drops usage-event JSON into;
+            # the sidecar drains it to linda HEC (see USAGE_SPOOL_DIR).
+            - name: usage-spool
+              mountPath: /var/run/usage
           resources:
             requests:
               cpu: 100m
@@ -251,6 +273,13 @@ spec:
               value: kl-triage-agent
             - name: DEFENSECLAW_AGENT_NAME
               value: "KL Triage Agent"
+            # Task #69a: the sidecar drains this shared spool (written by the
+            # agent) and POSTs each usage event to linda HEC using the
+            # SPLUNK_HEC_TOKEN it already holds (kl-defenseclaw-secrets). The
+            # entrypoint's usage-relay loop activates because this is set + the
+            # HEC token is present. Disable with USAGE_RELAY_ENABLED=false.
+            - name: USAGE_SPOOL_DIR
+              value: /var/run/usage
           ports:
             - name: guardrail
               containerPort: 4000
@@ -268,6 +297,10 @@ spec:
             # once the gateway has booted, for the agent container to consume.
             - name: sidecar-identity
               mountPath: /var/run/sidecar-identity
+            # Task #69a: shared spool the agent writes usage events into; the
+            # entrypoint's relay loop drains it to linda HEC.
+            - name: usage-spool
+              mountPath: /var/run/usage
           resources:
             requests:
               cpu: 150m         # +50m for the Python proxy idle
@@ -317,3 +350,11 @@ spec:
           emptyDir:
             medium: Memory
             sizeLimit: 1Mi
+        # Task #69a: pod-local spool shared agent(rw)→sidecar(drain). Memory-
+        # backed (small JSON files, drained every ~15s) + capped. Not persisted:
+        # any undrained file on pod teardown is at most a few seconds of usage
+        # events, and the relay's spool cap bounds growth during a HEC outage.
+        - name: usage-spool
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Mi

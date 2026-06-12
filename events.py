@@ -20,6 +20,7 @@ from __future__ import annotations
 import contextvars
 import json
 import logging
+import os
 import re
 import sys
 import uuid
@@ -27,6 +28,18 @@ from datetime import datetime, timezone
 from typing import Any
 
 _cycle_id: contextvars.ContextVar[str] = contextvars.ContextVar("kl_cycle_id", default="")
+
+# Task #69a — durable token-usage capture.
+# stdout rides the Splunk OTel filelog path, which starves low-volume namespaces
+# under node load (see memory: reference-otel-filelog-starvation), so usage
+# events are dropped on most run-days. When USAGE_SPOOL_DIR is set, these events
+# are ALSO written as one JSON file each into a shared spool dir; the DefenseClaw
+# sidecar drains it and POSTs each to linda HEC. The agent holds NO Splunk/HEC
+# credential — the sidecar (sole linda egress) does the POST, preserving the
+# agent's no-creds posture (same boundary as the audit #39 / health #64 paths).
+_USAGE_SPOOL_DIR = os.environ.get("USAGE_SPOOL_DIR", "").strip()
+# Token-usage events only. Names match the token dashboard's base search.
+_SPOOL_EVENTS = frozenset({"llm.detection_pass", "llm.triage_pass"})
 
 # Cycle metadata duplicated at module scope so out-of-task callers (the
 # /state HTTP server triage_mcp queries) can read "what cycle is currently
@@ -61,8 +74,36 @@ def emit(event: str, **fields: Any) -> None:
     if cid:
         record["cycle_id"] = cid
     record.update(fields)
-    sys.stdout.write(json.dumps(record, default=str, separators=(",", ":")) + "\n")
+    # Stamp a stable id on usage events so the durable HEC copy and the lossy
+    # filelog copy carry the SAME id — the dashboard dedups on it (counts once
+    # even on days both paths land). Added unconditionally so the field shape is
+    # uniform whether or not the spool relay is enabled.
+    if event in _SPOOL_EVENTS:
+        record.setdefault("usage_id", uuid.uuid4().hex)
+    line = json.dumps(record, default=str, separators=(",", ":"))
+    sys.stdout.write(line + "\n")
     sys.stdout.flush()
+    if _USAGE_SPOOL_DIR and event in _SPOOL_EVENTS:
+        _spool_usage(record, line)
+
+
+def _spool_usage(record: dict[str, Any], line: str) -> None:
+    """Best-effort durable copy of a usage event for the sidecar→HEC relay.
+
+    Writes one file per event atomically (tmp + rename) so the sidecar never
+    reads a half-written record. Never raises — stdout already has the event;
+    a spool failure must not perturb the agent.
+    """
+    try:
+        os.makedirs(_USAGE_SPOOL_DIR, exist_ok=True)
+        name = str(record.get("usage_id") or uuid.uuid4().hex)
+        tmp = os.path.join(_USAGE_SPOOL_DIR, f".{name}.tmp")
+        final = os.path.join(_USAGE_SPOOL_DIR, f"{name}.json")
+        with open(tmp, "w") as fh:
+            fh.write(line)
+        os.replace(tmp, final)
+    except Exception as exc:  # noqa: BLE001 — spooling is strictly best-effort
+        logging.getLogger(__name__).warning("usage spool write failed: %s", exc)
 
 
 def emit_decision(event: str, decided: Any, rationale: str, inputs: dict[str, Any], **extra: Any) -> None:
