@@ -41,6 +41,19 @@ _USAGE_SPOOL_DIR = os.environ.get("USAGE_SPOOL_DIR", "").strip()
 # Token-usage events only. Names match the token dashboard's base search.
 _SPOOL_EVENTS = frozenset({"llm.detection_pass", "llm.triage_pass"})
 
+# Task #70 — per-workload identity. Stamp a stable id/name/kind INSIDE each usage
+# event so the token dashboard can distinguish multiple agents/bots and so the
+# identity survives the dashboard's HEC-vs-filelog dedup (it's in the record, not
+# just the relay envelope). Reuses the same value as the sidecar's
+# DEFENSECLAW_AGENT_ID (e.g. kl-triage-agent). Empty → dashboard falls back to kind.
+_WORKLOAD_ID = os.environ.get("WORKLOAD_ID", "").strip()
+_WORKLOAD_NAME = os.environ.get("WORKLOAD_NAME", "").strip()
+_WORKLOAD_KIND = os.environ.get("WORKLOAD_KIND", "agent").strip()  # agent | bot
+# A pairing key the agent and its bot SHARE (same value on both) so the dashboard
+# can roll a paired agent+bot up as one unit. A second deployment gets its own fleet.
+_WORKLOAD_FLEET = os.environ.get("WORKLOAD_FLEET", "").strip()
+_WORKLOAD_FLEET_NAME = os.environ.get("WORKLOAD_FLEET_NAME", "").strip()
+
 # Cycle metadata duplicated at module scope so out-of-task callers (the
 # /state HTTP server triage_mcp queries) can read "what cycle is currently
 # in progress?" without needing access to the polling task's context.
@@ -80,6 +93,17 @@ def emit(event: str, **fields: Any) -> None:
     # uniform whether or not the spool relay is enabled.
     if event in _SPOOL_EVENTS:
         record.setdefault("usage_id", uuid.uuid4().hex)
+        # Per-workload identity (#70) — in the record so it survives dedup.
+        if _WORKLOAD_ID:
+            record.setdefault("agent_id", _WORKLOAD_ID)
+        if _WORKLOAD_NAME:
+            record.setdefault("agent_name", _WORKLOAD_NAME)
+        if _WORKLOAD_KIND:
+            record.setdefault("kind", _WORKLOAD_KIND)
+        if _WORKLOAD_FLEET:
+            record.setdefault("fleet", _WORKLOAD_FLEET)
+        if _WORKLOAD_FLEET_NAME:
+            record.setdefault("fleet_name", _WORKLOAD_FLEET_NAME)
     line = json.dumps(record, default=str, separators=(",", ":"))
     sys.stdout.write(line + "\n")
     sys.stdout.flush()

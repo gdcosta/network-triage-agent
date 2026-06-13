@@ -183,6 +183,21 @@ spec:
             # to stdout-only (lossy filelog) capture.
             - name: USAGE_SPOOL_DIR
               value: /var/run/usage
+            # Task #70: per-workload identity stamped into usage events so the
+            # token dashboard distinguishes multiple agents/bots. Matches the
+            # sidecar's DEFENSECLAW_AGENT_ID. A second agent gets a distinct id.
+            - name: WORKLOAD_ID
+              value: kl-triage-agent
+            - name: WORKLOAD_NAME
+              value: "KL Triage Agent"
+            - name: WORKLOAD_KIND
+              value: agent
+            # Shared with the bot (identical value on both) → the dashboard pairs
+            # this agent + its bot as one fleet. A second deployment gets its own.
+            - name: WORKLOAD_FLEET
+              value: kl-triage
+            - name: WORKLOAD_FLEET_NAME
+              value: "KL Triage"
           ports:
             - name: state
               containerPort: 8080
