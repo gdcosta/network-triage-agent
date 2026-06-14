@@ -56,6 +56,12 @@ class Config:
     # otherwise the detection pass re-alerts the just-recovered store.
     recovery_cooldown_seconds: int
 
+    # Task #71 recovery hysteresis: a store recovers only after it has been absent
+    # from the detection pass's correlate set for this many CONSECUTIVE cycles.
+    # Absorbs the LLM's single-cycle false "recovered" flips on a still-present
+    # borderline fault (store 112, 2026-06-13). Set >= 2; ~3 gives margin.
+    recovery_clear_cycles: int
+
     # Liveness: the poll loop touches this file each cycle; a k8s exec
     # probe checks its age to confirm the loop is still turning.
     heartbeat_file: str
@@ -135,6 +141,9 @@ def load_config(mock: bool = False) -> Config:
         poll_interval_seconds=int(os.environ.get("POLL_INTERVAL_SECONDS", "30")),
         earliest_time=os.environ.get("EARLIEST_TIME", "-5m"),
         latest_time=os.environ.get("LATEST_TIME", "now"),
+        recovery_clear_cycles=int(
+            os.environ.get("RECOVERY_CLEAR_CYCLES", "3")
+        ),
         recovery_cooldown_seconds=int(
             os.environ.get("RECOVERY_COOLDOWN_SECONDS", "300")
         ),

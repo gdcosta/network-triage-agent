@@ -47,6 +47,10 @@ class AlertState:
     # Task #66 recovery cooldown: store -> UTC time it last recovered. New alerts
     # for the store are suppressed for a window after this. See in_cooldown.
     _recovered_at: dict[str, datetime] = field(default_factory=dict)
+    # Task #71 recovery hysteresis: store -> consecutive cycles an OPEN alert has
+    # been absent from the detection correlate set. Recovery fires only at the
+    # threshold. See advance_recovery.
+    _clear_streak: dict[str, int] = field(default_factory=dict)
     # Task #56 stage 1: the agent's OWN past triage.report events, read back
     # from triage-mcp's get_alert_history at startup (and refreshed per cycle in
     # later stages). Read-only context — deliberately NOT merged into _active, so
@@ -140,8 +144,48 @@ class AlertState:
         self._downgrade[store] = (proposed, count)
         return prev.severity
 
+    def advance_recovery(self, faulting: set[str], clear_cycles: int) -> list[dict[str, Any]]:
+        """Deterministic, hysteresis-gated recovery (task #71).
+
+        Call once per cycle with `faulting` = the set of stores still faulting
+        this cycle (the detection pass's correlate set). For each OPEN alert: a
+        faulting store resets its clear-streak; a non-faulting store advances it.
+        Returns recovery specs for the open alerts whose clear-streak has reached
+        `clear_cycles` CONSECUTIVE non-faulting cycles — genuinely recovered and
+        ready to post (caller then posts the card + calls clear()).
+
+        Recovery is driven by this durable signal, NOT the LLM's recovery_stores
+        list, which flaps on borderline signals: store 112 (2026-06-13) had a
+        single false "recovered" cycle that posted a premature recovery card while
+        the Meraki fault was still present (drill_meraki=4), then re-alerted P2 the
+        next poll. The streak absorbs single-cycle drops. Subsumes the old
+        also_correlating guard (a faulting store can't accrue a streak) and the
+        no_open_alert guard (only open alerts are considered).
+        """
+        ready: list[dict[str, Any]] = []
+        for store, a in self._active.items():
+            if store in faulting:
+                self._clear_streak[store] = 0
+                continue
+            streak = self._clear_streak.get(store, 0) + 1
+            self._clear_streak[store] = streak
+            if streak >= clear_cycles:
+                ready.append({
+                    "store": a.store,
+                    "site": a.site,
+                    "recovered_domains": list(a.domains_affected),
+                    "first_seen": a.first_seen,
+                })
+        return ready
+
+    def clear_streak(self, store: str) -> int:
+        """Current consecutive non-faulting cycle count for an open alert (0 if
+        none) — for observability when recovery is being held by hysteresis."""
+        return self._clear_streak.get(store, 0)
+
     def clear(self, store: str) -> _Active | None:
         self._downgrade.pop(store, None)
+        self._clear_streak.pop(store, None)
         prev = self._active.pop(store, None)
         if prev is not None:
             # A real recovery just happened — start the cooldown window.

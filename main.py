@@ -255,23 +255,33 @@ async def poll_once(
         recurrence_stores=sorted(recurrence) if recurrence else [],
     )
 
-    # 3. Recovery cards
-    # Guard B: a store cannot be both recovered AND actively alerting in the same
-    # cycle. If detection lists a store in BOTH correlate_stores and
-    # recovery_stores, that's self-contradictory — trust the active alert and drop
-    # the recovery. Without this, a still-critical store flaps: recovery card +
-    # P1 card every cycle (observed 2026-06-03 on store 305, still hard-down).
-    # Deterministic; the alert wins over the LLM's contradictory recovery claim.
-    correlating = {s.get("store") for s in decision.correlate_stores}
-    recoveries = [r for r in decision.recovery_stores
-                  if r.get("store") not in correlating]
-    for store in (r.get("store") for r in decision.recovery_stores
-                  if r.get("store") in correlating):
-        events.emit("recovery.suppressed", store=store, reason="also_correlating")
-    if recoveries:
+    # 3. Recovery (task #71) — deterministic + hysteresis-gated.
+    # The recovery DECISION is the durable signal, NOT the LLM's recovery_stores
+    # list. A store recovers only after it has been absent from the detection
+    # correlate set for `recovery_clear_cycles` CONSECUTIVE cycles. This absorbs
+    # the LLM's single-cycle false "recovered" flips on a still-present borderline
+    # fault: store 112 (2026-06-13) had one "recovered" cycle that posted a
+    # premature recovery card while drill_meraki was still 4, then re-alerted P2
+    # the next poll. advance_recovery() subsumes the old guards — a faulting store
+    # can't accrue a clear-streak (was: also_correlating), and only open alerts
+    # are ever returned (was: no_open_alert).
+    faulting = {s.get("store") for s in decision.correlate_stores}
+    ready = state.advance_recovery(faulting, cfg.recovery_clear_cycles)
+    ready_stores = {s["store"] for s in ready}
+    # Observability: the LLM proposed these recovered, but hysteresis is holding
+    # them — either still faulting this cycle, or clear-streak below threshold.
+    for store in {r.get("store") for r in decision.recovery_stores}:
+        if state.is_active(store) and store not in ready_stores:
+            events.emit(
+                "recovery.suppressed", store=store,
+                reason="still_correlating" if store in faulting else "awaiting_clear_streak",
+                clear_streak=state.clear_streak(store),
+                needed=cfg.recovery_clear_cycles,
+            )
+    if ready:
         await asyncio.gather(*[
-            _send_recovery(rec, state, cfg, poster, scan_data)
-            for rec in recoveries
+            _send_recovery(spec, state, cfg, poster, scan_data)
+            for spec in ready
         ], return_exceptions=True)
 
     # 4. Drill in parallel for each correlated store
@@ -280,7 +290,7 @@ async def poll_once(
             "poll.complete",
             duration_ms=int((time.monotonic() - cycle_started) * 1000),
             cards_posted=0,
-            recoveries=len(recoveries),
+            recoveries=len(ready),
         )
         return
 
@@ -421,7 +431,7 @@ async def poll_once(
         "poll.complete",
         duration_ms=int((time.monotonic() - cycle_started) * 1000),
         cards_posted=posted,
-        recoveries=len(recoveries),
+        recoveries=len(ready),
     )
 
 
@@ -442,23 +452,27 @@ async def _run_all_drills(splunk, correlate_stores: list[dict], cfg: Config) -> 
 
 
 async def _send_recovery(
-    rec: dict, state: AlertState, cfg: Config, poster: Poster,
+    spec: dict, state: AlertState, cfg: Config, poster: Poster,
     scan_data: dict[str, list[dict]] | None = None,
 ) -> None:
-    store = rec.get("store", "")
+    # `spec` is a recovery spec from AlertState.advance_recovery (task #71) — a
+    # store whose OPEN alert has been clear for recovery_clear_cycles consecutive
+    # cycles. clear() removes the open alert and starts the cooldown window.
+    store = spec.get("store", "")
     prev = state.clear(store)
-    # Guard A: you can't recover what was never open. If the LLM names a store in
-    # recovery_stores that has no open alert in AlertState (prev is None), it's a
-    # phantom recovery — suppress it. Without this, a single hallucinated
-    # recovery_stores list posts "resolved" cards for healthy, never-alerted
-    # stores (observed 2026-06-03: 5 healthy stores resolved in one cycle while
-    # store 305 was still hard-down). Deterministic; independent of LLM judgment.
     if prev is None:
+        # advance_recovery only returns open alerts, so this is unreachable in
+        # practice — kept as a safety net against a future caller.
         events.emit("recovery.suppressed", store=store, reason="no_open_alert")
         return
     duration_min = (datetime.now(timezone.utc) - prev.first_seen).total_seconds() / 60.0
-    payload = {**rec, "duration_minutes": duration_min,
-               "timestamp": datetime.now(timezone.utc).isoformat()}
+    payload = {
+        "store": store,
+        "site": spec.get("site", ""),
+        "recovered_domains": spec.get("recovered_domains") or list(prev.domains_affected),
+        "duration_minutes": duration_min,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
     log_city = _city_from_scans(store, scan_data or {})
     if log_city:
         payload["site"] = log_city
@@ -468,8 +482,8 @@ async def _send_recovery(
         )
         await poster(cfg.teams_webhook_url, card)
         events.emit(
-            "recovery.posted", store=store, site=rec.get("site"),
-            recovered_domains=rec.get("recovered_domains"),
+            "recovery.posted", store=store, site=payload["site"],
+            recovered_domains=payload["recovered_domains"],
             duration_minutes=duration_min,
         )
     except Exception as exc:
