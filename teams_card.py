@@ -240,6 +240,67 @@ def build_recovery_card(
     }
 
 
+def _fmt_open(open_min: Any) -> str:
+    if not isinstance(open_min, (int, float)):
+        return "—"
+    if open_min >= 120:
+        return f"{open_min / 60:.1f} h ({open_min:.0f} min)"
+    return f"{open_min:.0f} min"
+
+
+def build_reminder_card(
+    spec: dict[str, Any],
+    splunk_base: str,
+    meraki_base: str,
+    store_names: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """Periodic "still active" reminder for an unresolved alert (task #72).
+
+    Deliberately a timed re-post — NOT a new incident and NOT subject to the
+    #66 dedup backstop. Carries the elapsed open-time so on-call sees how long
+    it has been unresolved."""
+    severity = spec.get("severity", "P3 MEDIUM")
+    style, emoji = SEVERITY_STYLE.get(severity, ("default", "•"))
+    iso = _iso_for_template(spec.get("timestamp"))
+    store = spec.get("store", "?")
+    site = spec.get("site") or "unknown site"
+    open_str = _fmt_open(spec.get("open_minutes"))
+
+    body: list[dict[str, Any]] = [
+        {
+            "type": "Container", "style": style,
+            "items": [
+                {"type": "TextBlock", "size": "Large", "weight": "Bolder",
+                 "text": f"⏰ STILL ACTIVE — {severity} — Store {store} ({site})", "wrap": True},
+                {"type": "TextBlock", "spacing": "None", "isSubtle": True,
+                 "text": f"Open for {open_str} · reminder {{{{DATE({iso}, SHORT)}}}} {{{{TIME({iso})}}}}"},
+            ],
+        },
+        {
+            "type": "Container", "separator": True,
+            "items": [{
+                "type": "FactSet",
+                "facts": [
+                    {"title": "Status",   "value": "Unresolved — still active"},
+                    {"title": "Open for",  "value": open_str},
+                    {"title": "Severity",  "value": severity},
+                    {"title": "Scope",     "value": spec.get("scope", "—")},
+                    {"title": "Domains",   "value": ", ".join(spec.get("domains_affected", [])) or "—"},
+                ],
+            }],
+        },
+    ]
+    return {
+        "type": "AdaptiveCard",
+        "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+        "version": "1.5",
+        "store_id": store,
+        "store_name": _store_name(store, spec.get("site"), store_names),
+        "body": body,
+        "actions": _actions(store, splunk_base, meraki_base),
+    }
+
+
 def _actions(store: str, splunk_base: str, meraki_base: str) -> list[dict]:
     splunk_search = quote(
         f'index=main "kl-{store}-" OR "N_KL0000{store}" OR "KL-{store}-" earliest=-30m'

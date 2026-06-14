@@ -38,13 +38,13 @@ from typing import Any, Awaitable, Callable
 import events
 import mcp_inspect
 import queries
-from config import Config, load_config
+from config import Config, current_reminder_interval, load_config
 from correlation import run_drills
 from llm_client import LLMClient
 from splunk_client import SplunkClient
 from state import AlertState
 from store import city_from_hostname, store_from_hostname
-from teams_card import build_card, build_recovery_card, post_card
+from teams_card import build_card, build_recovery_card, build_reminder_card, post_card
 
 log = logging.getLogger("triage")
 
@@ -283,6 +283,28 @@ async def poll_once(
             _send_recovery(spec, state, cfg, poster, scan_data)
             for spec in ready
         ], return_exceptions=True)
+
+    # 3.5 Reminders (task #72): periodic "still active" nudge for every OPEN
+    # alert — independent of the #66 dedup backstop (a reminder is a deliberate
+    # timed re-post, not a flap) and of whether this cycle correlated anything.
+    # The interval is resolved LIVE each cycle (control file -> env -> default)
+    # so it can be tuned without an image rebuild; 0 disables.
+    for spec in state.due_for_reminder(current_reminder_interval()):
+        try:
+            card = build_reminder_card(
+                spec, cfg.splunk_base_url, cfg.meraki_base_url, cfg.store_names,
+            )
+            await poster(cfg.teams_webhook_url, card)
+            state.mark_reminded(spec["store"])
+            events.emit(
+                "alert.reminder", store=spec["store"], severity=spec["severity"],
+                open_minutes=round(spec["open_minutes"], 1),
+            )
+        except Exception as exc:
+            events.emit(
+                "reminder.failed", store=spec["store"],
+                error=type(exc).__name__, message=str(exc)[:200],
+            )
 
     # 4. Drill in parallel for each correlated store
     if not decision.correlate_stores:

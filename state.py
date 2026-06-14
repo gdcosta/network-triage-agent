@@ -51,6 +51,9 @@ class AlertState:
     # been absent from the detection correlate set. Recovery fires only at the
     # threshold. See advance_recovery.
     _clear_streak: dict[str, int] = field(default_factory=dict)
+    # Task #72 reminders: store -> UTC time the last reminder/card went out. The
+    # next reminder fires `interval` after this. See due_for_reminder.
+    _last_reminder: dict[str, datetime] = field(default_factory=dict)
     # Task #56 stage 1: the agent's OWN past triage.report events, read back
     # from triage-mcp's get_alert_history at startup (and refreshed per cycle in
     # later stages). Read-only context — deliberately NOT merged into _active, so
@@ -178,6 +181,36 @@ class AlertState:
                 })
         return ready
 
+    def due_for_reminder(self, interval_seconds: float) -> list[dict[str, Any]]:
+        """Task #72: open alerts due a periodic "still active" reminder.
+
+        An alert is due when `interval_seconds` have passed since the most recent
+        notification for it — a card (last_sent) or a prior reminder, whichever is
+        later — so a reminder never fires right after a fresh/escalation card.
+        Returns specs (with open_minutes) for the caller to post. interval <= 0
+        disables (returns []). Stateless read; caller marks via mark_reminded.
+        """
+        if interval_seconds <= 0:
+            return []
+        now = datetime.now(timezone.utc)
+        due: list[dict[str, Any]] = []
+        for store, a in self._active.items():
+            last_reminder = self._last_reminder.get(store)
+            baseline = a.last_sent if last_reminder is None else max(last_reminder, a.last_sent)
+            if (now - baseline).total_seconds() >= interval_seconds:
+                due.append({
+                    "store": a.store,
+                    "site": a.site,
+                    "scope": a.scope,
+                    "severity": a.severity,
+                    "domains_affected": list(a.domains_affected),
+                    "open_minutes": (now - a.first_seen).total_seconds() / 60.0,
+                })
+        return due
+
+    def mark_reminded(self, store: str) -> None:
+        self._last_reminder[store] = datetime.now(timezone.utc)
+
     def clear_streak(self, store: str) -> int:
         """Current consecutive non-faulting cycle count for an open alert (0 if
         none) — for observability when recovery is being held by hysteresis."""
@@ -186,6 +219,7 @@ class AlertState:
     def clear(self, store: str) -> _Active | None:
         self._downgrade.pop(store, None)
         self._clear_streak.pop(store, None)
+        self._last_reminder.pop(store, None)
         prev = self._active.pop(store, None)
         if prev is not None:
             # A real recovery just happened — start the cooldown window.

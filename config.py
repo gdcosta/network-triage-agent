@@ -11,6 +11,47 @@ from dotenv import load_dotenv
 
 log = logging.getLogger(__name__)
 
+# Task #72 reminder cadence. Resolved LIVE on every call (NOT frozen into Config)
+# so it can be tuned without an image rebuild. Path of the optional control file
+# is fixed at startup; its CONTENTS are read each call.
+_REMINDER_FILE = os.environ.get(
+    "REMINDER_INTERVAL_FILE", "/config/reminder_interval_seconds"
+)
+_REMINDER_DEFAULT = 1800  # 30 min
+
+
+def current_reminder_interval() -> int:
+    """Reminder interval in seconds, resolved fresh each call. Precedence:
+
+      1. Control FILE (`REMINDER_INTERVAL_FILE`, default /config/reminder_interval_seconds)
+         — when backed by a ConfigMap *volume* mount, edits propagate live and the
+         agent picks them up next cycle with NO pod restart. THIS is the dynamic path.
+      2. `REMINDER_INTERVAL_SECONDS` env — simple default; changing it needs a pod
+         roll (k8s env is fixed at container start).
+      3. Default 1800 (30 min).
+
+    A value of 0 (from file or env) disables reminders. Blank/garbage falls through
+    to the next source, so an empty/typo'd file never breaks reminders.
+    """
+    for raw in (_read_text(_REMINDER_FILE), os.environ.get("REMINDER_INTERVAL_SECONDS")):
+        if raw is None or not raw.strip():
+            continue
+        try:
+            val = int(raw.strip())
+        except ValueError:
+            continue
+        if val >= 0:
+            return val
+    return _REMINDER_DEFAULT
+
+
+def _read_text(path: str) -> str | None:
+    try:
+        with open(path) as fh:
+            return fh.read()
+    except OSError:
+        return None
+
 
 @dataclass(frozen=True)
 class Config:
