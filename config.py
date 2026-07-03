@@ -60,6 +60,17 @@ class Config:
     llm_model: str
     soul_path: str
 
+    # LLM provider selection (#36 / #73 cost+quality A/B).
+    #   "anthropic" (default) — Anthropic SDK; in k8s this still flows through the
+    #     DefenseClaw guardrail proxy via ANTHROPIC_BASE_URL (unchanged).
+    #   "openai" — any OpenAI-compatible /v1 endpoint (e.g. the self-hosted vLLM
+    #     box). Uses llm_base_url + llm_api_key; structured output via json_schema
+    #     response_format instead of Anthropic tool_use. Nothing changes unless
+    #     LLM_PROVIDER is explicitly set to "openai".
+    llm_provider: str
+    llm_base_url: str
+    llm_api_key: str
+
     # Splunk MCP (data plane)
     splunk_mcp_command: str
     splunk_mcp_args: list[str]
@@ -149,9 +160,17 @@ def _load_store_registry(path: str) -> dict[str, str]:
 def load_config(mock: bool = False) -> Config:
     load_dotenv()
 
+    provider = os.environ.get("LLM_PROVIDER", "anthropic").strip().lower()
+    llm_base_url = os.environ.get("LLM_BASE_URL", "").strip()
+    # vLLM api key; "EMPTY" is the OpenAI-SDK convention for a keyless server
+    # (our box runs without --api-key, protected at the network layer).
+    llm_api_key = os.environ.get("LLM_API_KEY", "EMPTY").strip() or "EMPTY"
+
     api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
-    if not api_key and not mock:
+    if provider == "anthropic" and not api_key and not mock:
         raise RuntimeError("ANTHROPIC_API_KEY is required (or pass --mock)")
+    if provider == "openai" and not llm_base_url and not mock:
+        raise RuntimeError("LLM_BASE_URL is required when LLM_PROVIDER=openai")
 
     webhook = os.environ.get("TEAMS_WEBHOOK_URL", "").strip()
     if not webhook and not mock:
@@ -165,6 +184,9 @@ def load_config(mock: bool = False) -> Config:
         anthropic_api_key=api_key or "mock",
         llm_model=os.environ.get("LLM_MODEL", "claude-sonnet-4-6"),
         soul_path=os.environ.get("SOUL_PATH", "SOUL.md"),
+        llm_provider=provider,
+        llm_base_url=llm_base_url,
+        llm_api_key=llm_api_key,
         splunk_mcp_command=cmd or "mock",
         splunk_mcp_args=shlex.split(os.environ.get("SPLUNK_MCP_ARGS", "")),
         splunk_mcp_env=_parse_env_pairs(os.environ.get("SPLUNK_MCP_ENV", "")),

@@ -18,14 +18,47 @@ so within-cycle calls and consecutive polls are hits.
 """
 from __future__ import annotations
 
+import copy
 import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import httpx
 from anthropic import AsyncAnthropic
 
 import events
+
+
+def _require_all(schema: dict[str, Any]) -> dict[str, Any]:
+    """Deep-copy a JSON schema with every object's `required` set to all of its
+    declared properties.
+
+    The Anthropic tool_use path fills optional fields generously (Claude's tool
+    training), so our schemas list only the truly-mandatory fields in `required`.
+    But vLLM guided decoding only *guarantees* fields named in `required` — with
+    the loose list, the model emits those, narrates the rest (severity, scope,
+    recommendation, cascade_note, ...) into the free-text `reasoning`, and leaves
+    the structured fields null → an incomplete card. Forcing every field required
+    makes guided decoding emit the full structure. Unused fields on no_alert/skip
+    reports are harmless (those cards aren't posted). Objects with only
+    additionalProperties (domain_summaries/business_impact) are left as-is.
+    """
+    def walk(node: Any) -> None:
+        if not isinstance(node, dict):
+            return
+        props = node.get("properties")
+        if isinstance(props, dict):
+            node["required"] = list(props.keys())
+            for v in props.values():
+                walk(v)
+        items = node.get("items")
+        if isinstance(items, dict):
+            walk(items)
+
+    s = copy.deepcopy(schema)
+    walk(s)
+    return s
 
 
 # ---------- tool schemas ----------
@@ -196,10 +229,44 @@ class TriageReports:
 # ---------- client ----------
 
 class LLMClient:
-    def __init__(self, api_key: str, model: str, soul_path: str):
-        self._client = AsyncAnthropic(api_key=api_key)
+    """LLM wrapper supporting two providers, chosen at construction:
+
+      provider="anthropic" — Anthropic SDK, forced tool_use for structured output.
+                             In k8s the SDK's base_url is the DefenseClaw proxy
+                             (ANTHROPIC_BASE_URL), so governance is unchanged.
+      provider="openai"    — any OpenAI-compatible /v1 endpoint (self-hosted vLLM
+                             for the #73 A/B). Same schemas, enforced via
+                             response_format=json_schema (guided decoding) instead
+                             of tool_use, so no server-side tool-calling flag is
+                             needed. There is no Anthropic key on this path.
+    """
+
+    def __init__(
+        self,
+        model: str,
+        soul_path: str,
+        *,
+        provider: str = "anthropic",
+        api_key: str = "",
+        base_url: str = "",
+        vllm_api_key: str = "EMPTY",
+    ):
+        self._provider = provider
         self._model = model
         self._soul = Path(soul_path).read_text(encoding="utf-8")
+        if provider == "openai":
+            # Full endpoint (avoid httpx base_url path-join surprises with the
+            # leading-slash /chat/completions). base_url includes /v1.
+            self._endpoint = base_url.rstrip("/") + "/chat/completions"
+            self._http = httpx.AsyncClient(
+                headers={"Authorization": f"Bearer {vllm_api_key}"},
+                timeout=httpx.Timeout(120.0),  # vLLM triage passes run ~5-10s
+            )
+            self._client = None
+        else:
+            self._client = AsyncAnthropic(api_key=api_key)
+            self._http = None
+            self._endpoint = ""
 
     async def detection_pass(
         self,
@@ -260,6 +327,11 @@ class LLMClient:
         )
 
     async def _call(self, user_text: str, tool: dict[str, Any]) -> dict[str, Any]:
+        if self._provider == "openai":
+            return await self._call_openai(user_text, tool)
+        return await self._call_anthropic(user_text, tool)
+
+    async def _call_anthropic(self, user_text: str, tool: dict[str, Any]) -> dict[str, Any]:
         response = await self._client.messages.create(
             model=self._model,
             max_tokens=8192,
@@ -290,6 +362,65 @@ class LLMClient:
                 "output_tokens": usage.output_tokens,
                 "cache_read_input_tokens": getattr(usage, "cache_read_input_tokens", 0) or 0,
                 "cache_creation_input_tokens": getattr(usage, "cache_creation_input_tokens", 0) or 0,
+            },
+        }
+
+    async def _call_openai(self, user_text: str, tool: dict[str, Any]) -> dict[str, Any]:
+        # OpenAI-compatible (vLLM) path. No tool_use — the same tool input_schema
+        # is enforced via response_format=json_schema (vLLM guided decoding). The
+        # tool description + schema are folded into the user turn so the model gets
+        # the same semantic guidance the Anthropic tool definition carried; the
+        # grammar guarantees the shape. SOUL.md rides as the system message and is
+        # auto-cached by vLLM's prefix cache (no cache_control needed). _require_all
+        # tightens the schema so guided decoding emits the FULL card structure
+        # (Qwen3 otherwise narrates optional fields into `reasoning` — see docstring).
+        schema = _require_all(tool["input_schema"])
+        instruction = (
+            f"{tool['description']}\n\n"
+            "Return a single JSON object that conforms to this schema (the field "
+            "descriptions explain each value). Output JSON only — no prose, no "
+            "markdown fences:\n"
+            f"{json.dumps(schema, indent=2)}"
+        )
+        payload = {
+            "model": self._model,
+            "max_tokens": 8192,
+            # Deterministic triage: reproducible severity/dedup verdicts across
+            # cycles and a fair A/B vs Haiku. (Model default is temp 0.7.)
+            "temperature": 0,
+            "messages": [
+                {"role": "system", "content": self._soul},
+                {"role": "user", "content": f"{user_text}\n\n{instruction}"},
+            ],
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {"name": tool["name"], "schema": schema},
+            },
+        }
+        resp = await self._http.post(self._endpoint, json=payload)
+        resp.raise_for_status()
+        data = resp.json()
+        choice = data["choices"][0]
+        content = choice.get("message", {}).get("content") or "{}"
+        try:
+            tool_input = json.loads(content)
+        except json.JSONDecodeError as e:
+            # Guided decoding should make this impossible; if it fires, the
+            # endpoint isn't enforcing the schema — surface a short snippet.
+            raise RuntimeError(
+                f"vLLM returned non-JSON content ({e}): {content[:500]!r}"
+            ) from e
+        usage = data.get("usage", {}) or {}
+        return {
+            "tool_input": tool_input if isinstance(tool_input, dict) else {},
+            "stop_reason": choice.get("finish_reason"),
+            "usage": {
+                "input_tokens": usage.get("prompt_tokens", 0),
+                "output_tokens": usage.get("completion_tokens", 0),
+                # vLLM prefix-cache hits aren't reported in OpenAI usage; the
+                # dashboard tolerates zeros (self-hosted has no cache billing).
+                "cache_read_input_tokens": 0,
+                "cache_creation_input_tokens": 0,
             },
         }
 

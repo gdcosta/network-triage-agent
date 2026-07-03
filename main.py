@@ -635,10 +635,15 @@ async def run(mock: bool = False) -> None:
                     reason="--mock with no ANTHROPIC_API_KEY; scripted responses")
     else:
         llm = LLMClient(
-            api_key=cfg.anthropic_api_key,
             model=cfg.llm_model,
             soul_path=cfg.soul_path,
+            provider=cfg.llm_provider,
+            api_key=cfg.anthropic_api_key,
+            base_url=cfg.llm_base_url,
+            vllm_api_key=cfg.llm_api_key,
         )
+        events.emit("llm.mode", mode=cfg.llm_provider, model=cfg.llm_model,
+                    base_url=cfg.llm_base_url or "anthropic-default")
 
     async with AsyncExitStack() as stack:
         splunk = await stack.enter_async_context(splunk_cm)
