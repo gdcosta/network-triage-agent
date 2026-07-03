@@ -1,7 +1,7 @@
 {
-  "id": "03_wan_te_cascade",
+  "id": "03_wan_backup_te_cascade",
   "fault_type": "wan_transport_failure",
-  "description": "Store 237 WAN down + TE degraded downstream \u2014 expect P1 / SDWAN / cascade.",
+  "description": "Store 237 MPLS down (LTE up) + TE degraded downstream \u2014 expect P2 HIGH / SDWAN / cascade. Still on backup, so degraded not critical.",
   "previous_alerts": {},
   "scan_data": {
     "sdwan": [
@@ -330,7 +330,7 @@
     "detect_stores": [
       "237"
     ],
-    "severity": "P1 CRITICAL",
+    "severity": "P2 HIGH",
     "root_cause_key": "SDWAN",
     "cascade": true
   }

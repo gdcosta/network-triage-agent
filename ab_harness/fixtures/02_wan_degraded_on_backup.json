@@ -1,22 +1,8 @@
 {
-  "id": "04_wan_dedup",
+  "id": "02_wan_degraded_on_backup",
   "fault_type": "wan_transport_failure",
-  "description": "Store 237 degraded-on-backup, UNCHANGED from an open P2 \u2014 dedup should SKIP.",
-  "previous_alerts": {
-    "237": {
-      "store": "237",
-      "site": "portland",
-      "scope": "LOCALIZED",
-      "severity": "P2 HIGH",
-      "root_cause_key": "SDWAN",
-      "domains_affected": [
-        "SDWAN"
-      ],
-      "first_seen": "2026-07-03T18:00:00+00:00",
-      "last_sent": "2026-07-03T18:00:00+00:00",
-      "open_for_minutes": 30.0
-    }
-  },
+  "description": "Store 237 MPLS tunnel down but LTE backup UP, site degraded-but-reachable (2.5% loss) \u2014 expect P2 HIGH / SDWAN. NOT a full outage: the store is still online on backup.",
+  "previous_alerts": {},
   "scan_data": {
     "sdwan": [
       {
@@ -330,7 +316,6 @@
       "237"
     ],
     "severity": "P2 HIGH",
-    "root_cause_key": "SDWAN",
-    "dedup_decision": "skip"
+    "root_cause_key": "SDWAN"
   }
 }

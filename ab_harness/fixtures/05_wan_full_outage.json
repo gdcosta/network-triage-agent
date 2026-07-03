@@ -1,29 +1,29 @@
 {
-  "id": "02_wan_transport_failure",
+  "id": "05_wan_full_outage",
   "fault_type": "wan_transport_failure",
-  "description": "Store 237 MPLS tunnel down, 100% loss \u2014 expect P1 CRITICAL / SDWAN.",
+  "description": "Store 237 TRUE OUTAGE: BOTH transports down, site unreachable, 100% loss \u2014 expect P1 CRITICAL / SDWAN. The discriminator vs 02: does the model reserve P1 for a real outage, or over-escalate degraded-on-backup?",
   "previous_alerts": {},
   "scan_data": {
     "sdwan": [
       {
         "hostname": "kl-237-portland-rtr-1",
-        "site_health": "degraded",
-        "reachability": "reachable",
-        "device_status": "Normal",
-        "bfd_down": 1,
-        "bfd_up": 3,
+        "site_health": "unreachable",
+        "reachability": "unreachable",
+        "device_status": "Unreachable",
+        "bfd_down": 4,
+        "bfd_up": 0,
         "tunnel_states": [
           "down",
-          "up"
+          "down"
         ],
         "transports": [
           "mpls",
           "lte"
         ],
-        "avg_jitter": 95.0,
-        "avg_latency": 180.0,
-        "max_loss": 2.5,
-        "min_vqoe": 1.8
+        "avg_jitter": 0.0,
+        "avg_latency": 0.0,
+        "max_loss": 100,
+        "min_vqoe": 0.0
       },
       {
         "hostname": "kl-101-seattle-rtr-1",
@@ -244,50 +244,35 @@
         {
           "color": "mpls",
           "tunnel_state": "down",
-          "jitter_ms": 95,
-          "latency_ms": 180,
-          "loss_pct": 2.5,
-          "vqoe": 1.8,
+          "jitter_ms": 0,
+          "latency_ms": 0,
+          "loss_pct": 100,
+          "vqoe": 0.0,
           "first_seen": 1746000000,
           "last_seen": 1746000060,
-          "event_count": 5
+          "event_count": 8
         },
         {
           "color": "lte",
-          "tunnel_state": "up",
-          "jitter_ms": 12,
-          "latency_ms": 80,
-          "loss_pct": 0,
-          "vqoe": 8.0,
+          "tunnel_state": "down",
+          "jitter_ms": 0,
+          "latency_ms": 0,
+          "loss_pct": 100,
+          "vqoe": 0.0,
           "first_seen": 1746000000,
           "last_seen": 1746000060,
-          "event_count": 5
+          "event_count": 8
         },
         {
           "color": "SITE_SUMMARY",
-          "site_health": "degraded",
-          "bfd_up": 3,
-          "bfd_down": 1,
-          "reachability": "reachable"
+          "site_health": "unreachable",
+          "bfd_up": 0,
+          "bfd_down": 4,
+          "reachability": "unreachable"
         }
       ],
       "drill_te": [],
-      "drill_meraki": [
-        {
-          "sourcetype": "meraki:accesspoints",
-          "type": "wpa_auth",
-          "count": 8,
-          "device_count": 3,
-          "devices": [
-            "KL-237-PDX-AP1",
-            "KL-237-PDX-AP2",
-            "KL-237-PDX-AP3"
-          ],
-          "descriptions": [
-            "client reauth"
-          ]
-        }
-      ],
+      "drill_meraki": [],
       "drill_ise": [],
       "correlate_timeline": [
         {
@@ -297,16 +282,10 @@
           "detail": "mpls tunnel down"
         },
         {
-          "_time": 1746000020,
-          "domain": "TE",
-          "sourcetype": "cisco:thousandeyes:alerts",
-          "detail": "alert_cleared=false sev=MAJOR"
-        },
-        {
-          "_time": 1746000040,
-          "domain": "MERAKI",
-          "sourcetype": "meraki:accesspoints",
-          "detail": "wpa_auth client disconnect"
+          "_time": 1746000010,
+          "domain": "SDWAN",
+          "sourcetype": "cisco:sdwan:tunnelhealth",
+          "detail": "lte tunnel down \u2014 site unreachable, both transports lost"
         }
       ]
     }
