@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -384,7 +385,12 @@ class LLMClient:
         )
         payload = {
             "model": self._model,
-            "max_tokens": 8192,
+            # A self-hosted model has a bounded context window (vLLM --max-model-len,
+            # e.g. 16384 on the L4). prompt_tokens + max_tokens must fit inside it or
+            # vLLM returns 400 "maximum context length". Triage/detection output is
+            # <1K tokens, so 4096 is generous and leaves ample room for the ~8K SOUL+
+            # data prompt. Tune with LLM_MAX_TOKENS if you raise --max-model-len.
+            "max_tokens": int(os.environ.get("LLM_MAX_TOKENS", "4096")),
             # Deterministic triage: reproducible severity/dedup verdicts across
             # cycles and a fair A/B vs Haiku. (Model default is temp 0.7.)
             "temperature": 0,
@@ -398,7 +404,12 @@ class LLMClient:
             },
         }
         resp = await self._http.post(self._endpoint, json=payload)
-        resp.raise_for_status()
+        if resp.status_code >= 400:
+            # Surface vLLM's actual reason (context-length, schema, etc.) instead of
+            # a bare status — raise_for_status() hides the body that explains the 400.
+            raise RuntimeError(
+                f"vLLM {resp.status_code} from {self._endpoint}: {resp.text[:1000]}"
+            )
         data = resp.json()
         choice = data["choices"][0]
         content = choice.get("message", {}).get("content") or "{}"
