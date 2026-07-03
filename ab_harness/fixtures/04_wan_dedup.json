@@ -1,0 +1,336 @@
+{
+  "id": "04_wan_dedup",
+  "fault_type": "wan_transport_failure",
+  "description": "Store 237 WAN down, UNCHANGED from an open P1 \u2014 dedup should SKIP.",
+  "previous_alerts": {
+    "237": {
+      "store": "237",
+      "site": "portland",
+      "scope": "LOCALIZED",
+      "severity": "P1 CRITICAL",
+      "root_cause_key": "SDWAN",
+      "domains_affected": [
+        "SDWAN"
+      ],
+      "first_seen": "2026-07-03T18:00:00+00:00",
+      "last_sent": "2026-07-03T18:00:00+00:00",
+      "open_for_minutes": 30.0
+    }
+  },
+  "scan_data": {
+    "sdwan": [
+      {
+        "hostname": "kl-237-portland-rtr-1",
+        "site_health": "degraded",
+        "reachability": "reachable",
+        "device_status": "Normal",
+        "bfd_down": 1,
+        "bfd_up": 3,
+        "tunnel_states": [
+          "down",
+          "up"
+        ],
+        "transports": [
+          "mpls",
+          "lte"
+        ],
+        "avg_jitter": 95.0,
+        "avg_latency": 180.0,
+        "max_loss": 2.5,
+        "min_vqoe": 1.8
+      },
+      {
+        "hostname": "kl-101-seattle-rtr-1",
+        "site_health": "good",
+        "reachability": "reachable",
+        "device_status": "Normal",
+        "bfd_down": 0,
+        "bfd_up": 4,
+        "tunnel_states": [
+          "up",
+          "up"
+        ],
+        "transports": [
+          "mpls",
+          "lte"
+        ],
+        "avg_jitter": 6.0,
+        "avg_latency": 31.0,
+        "max_loss": 0,
+        "min_vqoe": 9.5
+      },
+      {
+        "hostname": "kl-150-tacoma-rtr-1",
+        "site_health": "good",
+        "reachability": "reachable",
+        "device_status": "Normal",
+        "bfd_down": 0,
+        "bfd_up": 4,
+        "tunnel_states": [
+          "up",
+          "up"
+        ],
+        "transports": [
+          "mpls",
+          "lte"
+        ],
+        "avg_jitter": 7.0,
+        "avg_latency": 32.0,
+        "max_loss": 0,
+        "min_vqoe": 9.5
+      }
+    ],
+    "te": [
+      {
+        "site": "portland",
+        "alert_cleared": "true",
+        "severity": "INFO",
+        "avg_resp_ms": 80,
+        "max_resp_ms": 100,
+        "max_loss_pct": 0,
+        "max_jitter": 5,
+        "isp_status": "healthy",
+        "edge_status": "healthy",
+        "path_conclusion": "healthy",
+        "bgp_status": "established",
+        "bgp_reach_pct": 100,
+        "bgp_path_changes": 0,
+        "agentName": "kl-te-portland-237.example.com"
+      },
+      {
+        "site": "seattle",
+        "alert_cleared": "true",
+        "severity": "INFO",
+        "avg_resp_ms": 81,
+        "max_resp_ms": 100,
+        "max_loss_pct": 0,
+        "max_jitter": 5,
+        "isp_status": "healthy",
+        "edge_status": "healthy",
+        "path_conclusion": "healthy",
+        "bgp_status": "established",
+        "bgp_reach_pct": 100,
+        "bgp_path_changes": 0,
+        "agentName": "kl-te-seattle-101.example.com"
+      },
+      {
+        "site": "tacoma",
+        "alert_cleared": "true",
+        "severity": "INFO",
+        "avg_resp_ms": 82,
+        "max_resp_ms": 100,
+        "max_loss_pct": 0,
+        "max_jitter": 5,
+        "isp_status": "healthy",
+        "edge_status": "healthy",
+        "path_conclusion": "healthy",
+        "bgp_status": "established",
+        "bgp_reach_pct": 100,
+        "bgp_path_changes": 0,
+        "agentName": "kl-te-tacoma-150.example.com"
+      }
+    ],
+    "meraki": [
+      {
+        "networkId": "N_KL0000237",
+        "sourcetype": "meraki:accesspoints",
+        "type": "wpa_auth",
+        "count": 50,
+        "device_count": 3,
+        "descriptions": [
+          "client connect"
+        ]
+      },
+      {
+        "networkId": "N_KL0000237",
+        "sourcetype": "meraki:switches",
+        "type": "port_status",
+        "count": 30,
+        "device_count": 2,
+        "descriptions": [
+          "port up"
+        ]
+      },
+      {
+        "networkId": "N_KL0000237",
+        "sourcetype": "meraki:securityappliances",
+        "type": "dhcp_lease",
+        "count": 20,
+        "device_count": 1,
+        "descriptions": [
+          "dhcp ack"
+        ]
+      },
+      {
+        "networkId": "N_KL0000101",
+        "sourcetype": "meraki:accesspoints",
+        "type": "wpa_auth",
+        "count": 50,
+        "device_count": 3,
+        "descriptions": [
+          "client connect"
+        ]
+      },
+      {
+        "networkId": "N_KL0000101",
+        "sourcetype": "meraki:switches",
+        "type": "port_status",
+        "count": 30,
+        "device_count": 2,
+        "descriptions": [
+          "port up"
+        ]
+      },
+      {
+        "networkId": "N_KL0000101",
+        "sourcetype": "meraki:securityappliances",
+        "type": "dhcp_lease",
+        "count": 20,
+        "device_count": 1,
+        "descriptions": [
+          "dhcp ack"
+        ]
+      },
+      {
+        "networkId": "N_KL0000150",
+        "sourcetype": "meraki:accesspoints",
+        "type": "wpa_auth",
+        "count": 50,
+        "device_count": 3,
+        "descriptions": [
+          "client connect"
+        ]
+      },
+      {
+        "networkId": "N_KL0000150",
+        "sourcetype": "meraki:switches",
+        "type": "port_status",
+        "count": 30,
+        "device_count": 2,
+        "descriptions": [
+          "port up"
+        ]
+      },
+      {
+        "networkId": "N_KL0000150",
+        "sourcetype": "meraki:securityappliances",
+        "type": "dhcp_lease",
+        "count": 20,
+        "device_count": 1,
+        "descriptions": [
+          "dhcp ack"
+        ]
+      }
+    ],
+    "ise": [
+      {
+        "ise_event": "CISE_Passed_Authentications",
+        "device_name": "KL-237-AP",
+        "count": 100,
+        "unique_users": 5,
+        "nas_ips": [
+          "10.10.237.1"
+        ]
+      },
+      {
+        "ise_event": "CISE_Passed_Authentications",
+        "device_name": "KL-101-AP",
+        "count": 100,
+        "unique_users": 5,
+        "nas_ips": [
+          "10.10.101.1"
+        ]
+      },
+      {
+        "ise_event": "CISE_Passed_Authentications",
+        "device_name": "KL-150-AP",
+        "count": 100,
+        "unique_users": 5,
+        "nas_ips": [
+          "10.10.150.1"
+        ]
+      }
+    ]
+  },
+  "drill_data": {
+    "237": {
+      "drill_sdwan": [
+        {
+          "color": "mpls",
+          "tunnel_state": "down",
+          "jitter_ms": 95,
+          "latency_ms": 180,
+          "loss_pct": 2.5,
+          "vqoe": 1.8,
+          "first_seen": 1746000000,
+          "last_seen": 1746000060,
+          "event_count": 5
+        },
+        {
+          "color": "lte",
+          "tunnel_state": "up",
+          "jitter_ms": 12,
+          "latency_ms": 80,
+          "loss_pct": 0,
+          "vqoe": 8.0,
+          "first_seen": 1746000000,
+          "last_seen": 1746000060,
+          "event_count": 5
+        },
+        {
+          "color": "SITE_SUMMARY",
+          "site_health": "degraded",
+          "bfd_up": 3,
+          "bfd_down": 1,
+          "reachability": "reachable"
+        }
+      ],
+      "drill_te": [],
+      "drill_meraki": [
+        {
+          "sourcetype": "meraki:accesspoints",
+          "type": "wpa_auth",
+          "count": 8,
+          "device_count": 3,
+          "devices": [
+            "KL-237-PDX-AP1",
+            "KL-237-PDX-AP2",
+            "KL-237-PDX-AP3"
+          ],
+          "descriptions": [
+            "client reauth"
+          ]
+        }
+      ],
+      "drill_ise": [],
+      "correlate_timeline": [
+        {
+          "_time": 1746000000,
+          "domain": "SDWAN",
+          "sourcetype": "cisco:sdwan:tunnelhealth",
+          "detail": "mpls tunnel down"
+        },
+        {
+          "_time": 1746000020,
+          "domain": "TE",
+          "sourcetype": "cisco:thousandeyes:alerts",
+          "detail": "alert_cleared=false sev=MAJOR"
+        },
+        {
+          "_time": 1746000040,
+          "domain": "MERAKI",
+          "sourcetype": "meraki:accesspoints",
+          "detail": "wpa_auth client disconnect"
+        }
+      ]
+    }
+  },
+  "reference": {
+    "detect_stores": [
+      "237"
+    ],
+    "severity": "P1 CRITICAL",
+    "root_cause_key": "SDWAN",
+    "dedup_decision": "skip"
+  }
+}

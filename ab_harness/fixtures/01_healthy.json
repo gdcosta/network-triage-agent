@@ -1,0 +1,246 @@
+{
+  "id": "01_healthy",
+  "fault_type": "none",
+  "description": "Healthy fleet \u2014 both models should stay SILENT (no detection).",
+  "previous_alerts": {},
+  "scan_data": {
+    "sdwan": [
+      {
+        "hostname": "kl-237-portland-rtr-1",
+        "site_health": "good",
+        "reachability": "reachable",
+        "device_status": "Normal",
+        "bfd_down": 0,
+        "bfd_up": 4,
+        "tunnel_states": [
+          "up",
+          "up"
+        ],
+        "transports": [
+          "mpls",
+          "lte"
+        ],
+        "avg_jitter": 5.0,
+        "avg_latency": 30.0,
+        "max_loss": 0,
+        "min_vqoe": 9.5
+      },
+      {
+        "hostname": "kl-101-seattle-rtr-1",
+        "site_health": "good",
+        "reachability": "reachable",
+        "device_status": "Normal",
+        "bfd_down": 0,
+        "bfd_up": 4,
+        "tunnel_states": [
+          "up",
+          "up"
+        ],
+        "transports": [
+          "mpls",
+          "lte"
+        ],
+        "avg_jitter": 6.0,
+        "avg_latency": 31.0,
+        "max_loss": 0,
+        "min_vqoe": 9.5
+      },
+      {
+        "hostname": "kl-150-tacoma-rtr-1",
+        "site_health": "good",
+        "reachability": "reachable",
+        "device_status": "Normal",
+        "bfd_down": 0,
+        "bfd_up": 4,
+        "tunnel_states": [
+          "up",
+          "up"
+        ],
+        "transports": [
+          "mpls",
+          "lte"
+        ],
+        "avg_jitter": 7.0,
+        "avg_latency": 32.0,
+        "max_loss": 0,
+        "min_vqoe": 9.5
+      }
+    ],
+    "te": [
+      {
+        "site": "portland",
+        "alert_cleared": "true",
+        "severity": "INFO",
+        "avg_resp_ms": 80,
+        "max_resp_ms": 100,
+        "max_loss_pct": 0,
+        "max_jitter": 5,
+        "isp_status": "healthy",
+        "edge_status": "healthy",
+        "path_conclusion": "healthy",
+        "bgp_status": "established",
+        "bgp_reach_pct": 100,
+        "bgp_path_changes": 0,
+        "agentName": "kl-te-portland-237.example.com"
+      },
+      {
+        "site": "seattle",
+        "alert_cleared": "true",
+        "severity": "INFO",
+        "avg_resp_ms": 81,
+        "max_resp_ms": 100,
+        "max_loss_pct": 0,
+        "max_jitter": 5,
+        "isp_status": "healthy",
+        "edge_status": "healthy",
+        "path_conclusion": "healthy",
+        "bgp_status": "established",
+        "bgp_reach_pct": 100,
+        "bgp_path_changes": 0,
+        "agentName": "kl-te-seattle-101.example.com"
+      },
+      {
+        "site": "tacoma",
+        "alert_cleared": "true",
+        "severity": "INFO",
+        "avg_resp_ms": 82,
+        "max_resp_ms": 100,
+        "max_loss_pct": 0,
+        "max_jitter": 5,
+        "isp_status": "healthy",
+        "edge_status": "healthy",
+        "path_conclusion": "healthy",
+        "bgp_status": "established",
+        "bgp_reach_pct": 100,
+        "bgp_path_changes": 0,
+        "agentName": "kl-te-tacoma-150.example.com"
+      }
+    ],
+    "meraki": [
+      {
+        "networkId": "N_KL0000237",
+        "sourcetype": "meraki:accesspoints",
+        "type": "wpa_auth",
+        "count": 50,
+        "device_count": 3,
+        "descriptions": [
+          "client connect"
+        ]
+      },
+      {
+        "networkId": "N_KL0000237",
+        "sourcetype": "meraki:switches",
+        "type": "port_status",
+        "count": 30,
+        "device_count": 2,
+        "descriptions": [
+          "port up"
+        ]
+      },
+      {
+        "networkId": "N_KL0000237",
+        "sourcetype": "meraki:securityappliances",
+        "type": "dhcp_lease",
+        "count": 20,
+        "device_count": 1,
+        "descriptions": [
+          "dhcp ack"
+        ]
+      },
+      {
+        "networkId": "N_KL0000101",
+        "sourcetype": "meraki:accesspoints",
+        "type": "wpa_auth",
+        "count": 50,
+        "device_count": 3,
+        "descriptions": [
+          "client connect"
+        ]
+      },
+      {
+        "networkId": "N_KL0000101",
+        "sourcetype": "meraki:switches",
+        "type": "port_status",
+        "count": 30,
+        "device_count": 2,
+        "descriptions": [
+          "port up"
+        ]
+      },
+      {
+        "networkId": "N_KL0000101",
+        "sourcetype": "meraki:securityappliances",
+        "type": "dhcp_lease",
+        "count": 20,
+        "device_count": 1,
+        "descriptions": [
+          "dhcp ack"
+        ]
+      },
+      {
+        "networkId": "N_KL0000150",
+        "sourcetype": "meraki:accesspoints",
+        "type": "wpa_auth",
+        "count": 50,
+        "device_count": 3,
+        "descriptions": [
+          "client connect"
+        ]
+      },
+      {
+        "networkId": "N_KL0000150",
+        "sourcetype": "meraki:switches",
+        "type": "port_status",
+        "count": 30,
+        "device_count": 2,
+        "descriptions": [
+          "port up"
+        ]
+      },
+      {
+        "networkId": "N_KL0000150",
+        "sourcetype": "meraki:securityappliances",
+        "type": "dhcp_lease",
+        "count": 20,
+        "device_count": 1,
+        "descriptions": [
+          "dhcp ack"
+        ]
+      }
+    ],
+    "ise": [
+      {
+        "ise_event": "CISE_Passed_Authentications",
+        "device_name": "KL-237-AP",
+        "count": 100,
+        "unique_users": 5,
+        "nas_ips": [
+          "10.10.237.1"
+        ]
+      },
+      {
+        "ise_event": "CISE_Passed_Authentications",
+        "device_name": "KL-101-AP",
+        "count": 100,
+        "unique_users": 5,
+        "nas_ips": [
+          "10.10.101.1"
+        ]
+      },
+      {
+        "ise_event": "CISE_Passed_Authentications",
+        "device_name": "KL-150-AP",
+        "count": 100,
+        "unique_users": 5,
+        "nas_ips": [
+          "10.10.150.1"
+        ]
+      }
+    ]
+  },
+  "drill_data": {},
+  "reference": {
+    "detect_stores": [],
+    "severity": null
+  }
+}
