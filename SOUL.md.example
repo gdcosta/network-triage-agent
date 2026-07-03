@@ -473,6 +473,23 @@ From correlate_timeline, identify the first domain to change.
     - New Meraki event type, no auth impact yet
     - BGP path changes without reachability loss
 
+  WAN severity boundary — be precise, do NOT over-escalate degraded-on-backup:
+    - P1 requires NO working transport: ALL tunnels down / site UNREACHABLE / no
+      path carrying traffic. This is a real outage — the store cannot transact.
+      Confirm with reachability and the SITE_SUMMARY drill row, not a single tunnel.
+    - Primary transport down BUT a backup is up and the site is REACHABLE is P2,
+      not P1 — the store is still online on backup. A low vQoE, high jitter, or
+      high loss on the FAILED tunnel does NOT make it P1 while a backup carries
+      traffic. Judge severity by whether a working path exists (reachability /
+      SITE_SUMMARY: reachable, bfd_up > 0), not by the worst single-tunnel metric.
+      Example: MPLS tunnel_state=down but LTE up and site reachable → P2 HIGH.
+    - Downstream symptoms of a WAN failure (TE latency, Meraki reauths, ISE retries
+      that are CAUSED by the WAN issue) do NOT independently raise the tier —
+      severity follows the ROOT CAUSE's path-availability. The "TE response time
+      > 500ms → P1" rule above applies to TE as a ROOT CAUSE (an ISP/application
+      fault with the WAN healthy), not to TE degradation that is a downstream
+      symptom of a WAN-transport failure.
+
   Confidence:
     HIGH   = multiple domains confirm same root cause
     MEDIUM = single domain flagged

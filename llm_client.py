@@ -251,9 +251,14 @@ class LLMClient:
         api_key: str = "",
         base_url: str = "",
         vllm_api_key: str = "EMPTY",
+        temperature: float | None = None,
     ):
         self._provider = provider
         self._model = model
+        # temperature: None = leave unset (Claude default) on the anthropic path;
+        # the openai/vLLM path defaults to 0. The A/B harness passes 0 to BOTH so
+        # the comparison is deterministic. Production leaves this None (unchanged).
+        self._temperature = temperature
         self._soul = Path(soul_path).read_text(encoding="utf-8")
         if provider == "openai":
             # Full endpoint (avoid httpx base_url path-join surprises with the
@@ -333,7 +338,7 @@ class LLMClient:
         return await self._call_anthropic(user_text, tool)
 
     async def _call_anthropic(self, user_text: str, tool: dict[str, Any]) -> dict[str, Any]:
-        response = await self._client.messages.create(
+        kwargs: dict[str, Any] = dict(
             model=self._model,
             max_tokens=8192,
             system=[
@@ -347,6 +352,9 @@ class LLMClient:
             tool_choice={"type": "tool", "name": tool["name"]},
             messages=[{"role": "user", "content": user_text}],
         )
+        if self._temperature is not None:
+            kwargs["temperature"] = self._temperature
+        response = await self._client.messages.create(**kwargs)
         # Locate the tool_use block (forced by tool_choice).
         tool_input: dict[str, Any] = {}
         for block in response.content:
@@ -393,7 +401,7 @@ class LLMClient:
             "max_tokens": int(os.environ.get("LLM_MAX_TOKENS", "4096")),
             # Deterministic triage: reproducible severity/dedup verdicts across
             # cycles and a fair A/B vs Haiku. (Model default is temp 0.7.)
-            "temperature": 0,
+            "temperature": self._temperature if self._temperature is not None else 0,
             "messages": [
                 {"role": "system", "content": self._soul},
                 {"role": "user", "content": f"{user_text}\n\n{instruction}"},
