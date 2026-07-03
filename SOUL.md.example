@@ -490,22 +490,6 @@ From correlate_timeline, identify the first domain to change.
       fault with the WAN healthy), not to TE degradation that is a downstream
       symptom of a WAN-transport failure.
 
-  Worked examples — apply the boundary above:
-    EX-1 (degraded on backup → P2 HIGH, NOT P1):
-      Signals: SDWAN tunnel_states=[down, up] (MPLS down, LTE up); SITE_SUMMARY
-        reachability=reachable, bfd_up=3, bfd_down=1; min_vqoe=1.8 on the FAILED
-        MPLS tunnel; LTE vqoe=8.0. TE avg_resp may be elevated (downstream symptom).
-      Correct = P2 HIGH. MPLS is down, but LTE is up and the site is REACHABLE —
-        the store is online on backup. The 1.8 vQoE belongs to the dead MPLS tunnel;
-        LTE (vQoE 8.0) is carrying traffic. The TE bump is a downstream symptom, not
-        a P1 trigger. Do NOT escalate to P1 — a working path exists.
-    EX-2 (full outage → P1 CRITICAL):
-      Signals: SDWAN tunnel_states=[down, down]; SITE_SUMMARY reachability=unreachable,
-        bfd_up=0, bfd_down=4; ~100% loss on all transports.
-      Correct = P1 CRITICAL. BOTH transports are down and the site is UNREACHABLE —
-        no path is carrying traffic, the store cannot transact. This is a real outage.
-    The discriminator is reachability / bfd_up, NOT the worst single tunnel's vQoE.
-
   Confidence:
     HIGH   = multiple domains confirm same root cause
     MEDIUM = single domain flagged
