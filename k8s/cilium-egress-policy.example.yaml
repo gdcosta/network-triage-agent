@@ -84,6 +84,19 @@ spec:
         - ports:
             - port: "8088"
               protocol: TCP
+    # vLLM box (task #1) — the DefenseClaw sidecar's LLM shim forwards the agent's
+    # openai/vLLM calls here when the provider is toggled to "openai" (the agent
+    # container only talks to the sidecar over loopback). The box is an off-cluster
+    # EC2 whose private IP CHANGES each launch — uncomment + set the current IP
+    # alongside the ConfigMap `vllm_target` flip, then apply. Kept COMMENTED so
+    # egress stays tight when not experimenting. The box's own security group must
+    # also allow inbound :8000 from the cluster node IP the pod lands on.
+    #- toCIDR:
+    #    - <VLLM_BOX_INTERNAL_IP>/32
+    #  toPorts:
+    #    - ports:
+    #        - port: "8000"
+    #          protocol: TCP
     # triage-mcp — agent reads its own alert history for recurrence (#56)
     - toEndpoints:
         - matchLabels:

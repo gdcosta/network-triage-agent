@@ -107,6 +107,67 @@ kubectl rollout restart deployment/kl-triage-agent -n net-triage-agent
 After a **credential change** — recreate the Secret the same way, then
 `rollout restart`.
 
+## Live LLM provider toggle + vLLM governance (task #1)
+
+**How it's wired.** The agent holds an Anthropic client **and** a vLLM client at
+once and picks the active one **each poll cycle**. On the vLLM path it posts plain
+OpenAI to the **LLM guardrail shim** in the DefenseClaw sidecar (loopback
+`127.0.0.1:4100`) — *not* the box directly. The shim inspects the prompt via
+DefenseClaw's `/api/v1/inspect/request` (emitting the audit trail) and forwards to
+the box **holding the vLLM token**. So the agent holds no token and the *sidecar*
+egresses to the box. (DefenseClaw's own `:4000` proxy can't route to a custom vLLM
+host, which is why this first-party shim exists — see `kl-governance/llm_shim.py`.)
+
+**Three ConfigMap keys drive it, all live (no pod restart):**
+
+| Key (`kl-triage-config`) | Read by | Values | Meaning |
+|---|---|---|---|
+| `llm_provider` | agent | `anthropic` \| `openai` | which backend is live |
+| `vllm_model`   | agent | e.g. `Qwen/Qwen3-30B-A3B-Instruct-2507-FP8` | request-body model id |
+| `vllm_target`  | **shim** | `http://<box-ip>:8000/v1` | the box (follows a relaunch) |
+
+The agent's own endpoint (`LLM_BASE_URL` → the shim loopback) is **static**; the
+changing box IP lives in `vllm_target`, which the shim re-reads each request — so
+a relaunched box is a ConfigMap patch, no restart. Absent keys → env defaults
+(`LLM_PROVIDER` defaults to `anthropic`).
+
+**Flip to the vLLM box** (patch merge — touches only these keys, leaves SOUL.md /
+store_registry.json intact, no rollout):
+
+```bash
+kubectl -n net-triage-agent patch configmap kl-triage-config --type merge -p \
+  '{"data":{"llm_provider":"openai","vllm_model":"Qwen/Qwen3-30B-A3B-Instruct-2507-FP8","vllm_target":"http://172.31.15.118:8000/v1"}}'
+```
+
+**Point at a relaunched box (new IP) — shim only, no restart:**
+
+```bash
+kubectl -n net-triage-agent patch configmap kl-triage-config --type merge -p \
+  '{"data":{"vllm_target":"http://<new-box-ip>:8000/v1"}}'
+```
+
+**Flip back to Anthropic** (instant — that client is always built):
+
+```bash
+kubectl -n net-triage-agent patch configmap kl-triage-config --type merge -p \
+  '{"data":{"llm_provider":"anthropic"}}'
+```
+
+> If you tested an earlier build, **delete the stale `llm_base_url` key** —
+> it's no longer used (the box URL moved to `vllm_target`):
+> `kubectl -n net-triage-agent patch configmap kl-triage-config --type json -p '[{"op":"remove","path":"/data/llm_base_url"}]'`
+
+ConfigMap-volume propagation takes up to ~60s; the loop then emits `llm.mode`
+(`mode:"openai"`), and a bad/missing `vllm_model` fails **safe** (`llm.mode_fallback`
+→ stays on Anthropic).
+
+**Egress + proof.** The *sidecar* forwards to the box, so its Cilium egress must
+allow `<box-ip>:8000` (uncomment the vLLM rule in `k8s/cilium-egress-policy.yaml`,
+set the IP, apply). The box SG must allow inbound `:8000` from the cluster node IP.
+Governance proof: an `inspect-request-*` event under `sourcetype=defenseclaw:inspect`
+in linda's `defenseclaw_audit` index for each vLLM call (plus `shim.inspect` /
+`shim.forward` JSONL from the sidecar).
+
 ## Tuning
 
 - **Resources** (`deployment.yaml`): requests 100m / 192Mi, limits

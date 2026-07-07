@@ -53,6 +53,57 @@ def _read_text(path: str) -> str | None:
         return None
 
 
+# Task #1 live provider toggle. Both resolved fresh each cycle (like the #72
+# reminder interval) so LLM_PROVIDER / LLM_BASE_URL can be flipped via a ConfigMap
+# volume mount with NO pod restart — the poll loop picks the new values next cycle.
+_PROVIDER_FILE = os.environ.get("LLM_PROVIDER_FILE", "/config/llm_provider")
+_VLLM_MODEL_FILE = os.environ.get("VLLM_MODEL_FILE", "/config/vllm_model")
+_VALID_PROVIDERS = ("anthropic", "openai")
+
+
+def current_provider() -> str:
+    """Active LLM provider, resolved fresh each cycle. Precedence:
+
+      1. Control FILE (`LLM_PROVIDER_FILE`, default /config/llm_provider) — when
+         backed by a ConfigMap *volume* mount, edits propagate live and the agent
+         picks them up next cycle with NO pod restart. THIS is the dynamic path.
+      2. `LLM_PROVIDER` env — bootstrap/default; changing it needs a pod roll.
+      3. "anthropic".
+
+    Unknown/garbage values (typo'd file, blank) fall through to the next source,
+    so a bad control file never strands the agent on an invalid provider.
+    """
+    for raw in (_read_text(_PROVIDER_FILE), os.environ.get("LLM_PROVIDER")):
+        if raw is None:
+            continue
+        val = raw.strip().lower()
+        if val in _VALID_PROVIDERS:
+            return val
+    return "anthropic"
+
+
+def current_llm_base_url() -> str:
+    """The agent's openai HTTP target — a STATIC endpoint from LLM_BASE_URL env.
+    In k8s this is the loopback LLM shim in the DefenseClaw sidecar
+    (http://127.0.0.1:4100/v1); in the A/B harness it's the box directly. It is
+    deliberately NOT a live ConfigMap file: the box's changing IP is the SHIM's
+    concern (it reads vllm_target live), so the agent's target never moves. Blank
+    when the openai backend isn't configured (then the toggle falls back to
+    anthropic)."""
+    return os.environ.get("LLM_BASE_URL", "").strip()
+
+
+def current_vllm_model() -> str:
+    """Served vLLM model id, resolved fresh each cycle (file -> VLLM_MODEL env ->
+    ""). Live like current_llm_base_url so switching box *and* model (e.g. AWQ on
+    L4 -> FP8 on L40S) is a ConfigMap edit — the agent rebuilds the openai client
+    when base url OR model changes. Blank disables the openai backend."""
+    for raw in (_read_text(_VLLM_MODEL_FILE), os.environ.get("VLLM_MODEL")):
+        if raw and raw.strip():
+            return raw.strip()
+    return ""
+
+
 @dataclass(frozen=True)
 class Config:
     # LLM (the brain)
@@ -70,6 +121,10 @@ class Config:
     llm_provider: str
     llm_base_url: str
     llm_api_key: str
+    # openai/vLLM model id (env VLLM_MODEL). Separate from llm_model (the anthropic
+    # model) so BOTH clients can be built at once for the live toggle — each carries
+    # its own model. Blank disables the openai backend even if a base url is set.
+    vllm_model: str
 
     # Splunk MCP (data plane)
     splunk_mcp_command: str
@@ -187,6 +242,7 @@ def load_config(mock: bool = False) -> Config:
         llm_provider=provider,
         llm_base_url=llm_base_url,
         llm_api_key=llm_api_key,
+        vllm_model=os.environ.get("VLLM_MODEL", "").strip(),
         splunk_mcp_command=cmd or "mock",
         splunk_mcp_args=shlex.split(os.environ.get("SPLUNK_MCP_ARGS", "")),
         splunk_mcp_env=_parse_env_pairs(os.environ.get("SPLUNK_MCP_ENV", "")),

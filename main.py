@@ -38,7 +38,14 @@ from typing import Any, Awaitable, Callable
 import events
 import mcp_inspect
 import queries
-from config import Config, current_reminder_interval, load_config
+from config import (
+    Config,
+    current_llm_base_url,
+    current_provider,
+    current_reminder_interval,
+    current_vllm_model,
+    load_config,
+)
 from correlation import run_drills
 from llm_client import LLMClient
 from splunk_client import SplunkClient
@@ -516,7 +523,28 @@ async def _send_recovery(
         log.exception("recovery webhook failed for store %s", store)
 
 
-def _bootstrap_defenseclaw_proxy_headers(wait_seconds: int = 60) -> None:
+def _read_gateway_token(wait_seconds: int = 60) -> str:
+    """Read the sidecar's gateway token from the shared in-memory identity file
+    (task #29). Sidecar and agent start in parallel, so poll briefly for the file
+    to appear. Returns "" if it never shows — callers then skip proxy auth (and
+    the proxied calls 401 visibly rather than silently bypassing governance).
+
+    Used by BOTH proxy paths: the anthropic SDK headers (_bootstrap below) and the
+    openai path's X-DC-Auth (task #1). Read once at startup and shared."""
+    path = "/var/run/sidecar-identity/identity.json"
+    for _ in range(max(1, wait_seconds)):
+        try:
+            with open(path) as f:
+                token = (json.load(f) or {}).get("token", "") or ""
+        except (OSError, json.JSONDecodeError):
+            token = ""
+        if token:
+            return token
+        time.sleep(1)
+    return ""
+
+
+def _bootstrap_defenseclaw_proxy_headers(token: str) -> None:
     """Task #55: make the agent's Anthropic SDK calls authenticate to the
     local DefenseClaw guardrail proxy.
 
@@ -533,35 +561,21 @@ def _bootstrap_defenseclaw_proxy_headers(wait_seconds: int = 60) -> None:
     untouched as the upstream provider key (the connector reads it via
     ExtractAPIKey and strips the X-DC-* headers before forwarding upstream).
 
-    The gateway token is written by the sidecar to a shared in-memory volume
-    at /var/run/sidecar-identity/identity.json (task #29). Sidecar and agent
-    start in parallel, so we poll briefly for that file to appear.
+    `token` is the shared gateway token from _read_gateway_token().
 
     No-op (so local dev / --mock / direct-to-Anthropic are unaffected) when
     ANTHROPIC_BASE_URL is unset, when an operator already supplied
-    ANTHROPIC_CUSTOM_HEADERS, or when the identity file never appears (logged,
-    then calls 401 visibly rather than silently bypassing governance)."""
+    ANTHROPIC_CUSTOM_HEADERS, or when the token is empty (logged, then calls
+    401 visibly rather than silently bypassing governance)."""
     if not os.environ.get("ANTHROPIC_BASE_URL"):
         return
     if os.environ.get("ANTHROPIC_CUSTOM_HEADERS"):
         return  # operator-supplied headers win; don't clobber
 
-    path = "/var/run/sidecar-identity/identity.json"
-    token = ""
-    for _ in range(max(1, wait_seconds)):
-        try:
-            with open(path) as f:
-                token = (json.load(f) or {}).get("token", "") or ""
-        except (OSError, json.JSONDecodeError):
-            token = ""
-        if token:
-            break
-        time.sleep(1)
-
     if not token:
         events.emit(
             "llm.proxy_auth.unavailable",
-            path=path,
+            path="/var/run/sidecar-identity/identity.json",
             reason="no gateway token after wait; proxy calls will 401",
         )
         return
@@ -596,11 +610,13 @@ async def run(mock: bool = False) -> None:
     # first (potentially slow) poll cycle finishes.
     _touch_heartbeat(cfg.heartbeat_file)
 
-    # Task #55: if routed through the DefenseClaw guardrail proxy, materialize
-    # the X-DC-Auth / X-DC-Target-URL headers before the LLM client is built.
-    # Heartbeat is already fresh above, so the brief wait-for-identity here
-    # cannot trip the liveness probe.
-    _bootstrap_defenseclaw_proxy_headers()
+    # Task #55: materialize the anthropic SDK's DefenseClaw proxy headers before
+    # the LLM client is built. (The openai/vLLM path is governed by the sidecar
+    # LLM shim, not this SDK proxy — the agent just posts plain to the shim's
+    # loopback, so it needs no gateway token of its own.) Heartbeat is already
+    # fresh above, so the brief wait-for-identity here can't trip the probe.
+    if os.environ.get("ANTHROPIC_BASE_URL"):
+        _bootstrap_defenseclaw_proxy_headers(_read_gateway_token())
 
     # Opt-in HTTP state server for the triage_mcp companion service.
     # Disabled by default (port=0) so legacy deployments without the MCP
@@ -628,22 +644,60 @@ async def run(mock: bool = False) -> None:
         poster = post_card
 
     use_mock_llm = mock and cfg.anthropic_api_key in ("", "mock")
+
+    mock_llm = None
+    anthropic_llm = None
     if use_mock_llm:
         from mock_llm import MockLLMClient
-        llm = MockLLMClient()
+        mock_llm = MockLLMClient()
         events.emit("llm.mode", mode="mock",
                     reason="--mock with no ANTHROPIC_API_KEY; scripted responses")
     else:
-        llm = LLMClient(
+        # The anthropic client is always built — it's the default brain AND the
+        # instant flip-back target for the live toggle. The openai/vLLM client is
+        # built lazily and rebuilt only when the box URL changes (see _select_llm).
+        anthropic_llm = LLMClient(
             model=cfg.llm_model,
             soul_path=cfg.soul_path,
-            provider=cfg.llm_provider,
+            provider="anthropic",
             api_key=cfg.anthropic_api_key,
-            base_url=cfg.llm_base_url,
-            vllm_api_key=cfg.llm_api_key,
         )
-        events.emit("llm.mode", mode=cfg.llm_provider, model=cfg.llm_model,
-                    base_url=cfg.llm_base_url or "anthropic-default")
+
+    # Task #1 live toggle: pick the active client each cycle from the ConfigMap-
+    # backed provider flag + base url (current_provider / current_llm_base_url),
+    # with NO pod restart. The openai client is cached and rebuilt only when its
+    # base url changes, so a relaunched box's new IP is followed live.
+    _openai_cache: dict[str, Any] = {"client": None, "base": None, "model": None}
+
+    async def _select_llm() -> tuple[Any, str, str]:
+        if use_mock_llm:
+            return mock_llm, "mock", cfg.llm_model
+        if current_provider() == "openai":
+            base = current_llm_base_url()
+            model = current_vllm_model()
+            if base and model:
+                if (_openai_cache["client"] is None
+                        or _openai_cache["base"] != base
+                        or _openai_cache["model"] != model):
+                    if _openai_cache["client"] is not None:
+                        await _openai_cache["client"].aclose()
+                    _openai_cache["client"] = LLMClient(
+                        model=model,
+                        soul_path=cfg.soul_path,
+                        provider="openai",
+                        base_url=base,
+                        vllm_api_key=cfg.llm_api_key,
+                    )
+                    _openai_cache["base"] = base
+                    _openai_cache["model"] = model
+                return _openai_cache["client"], "openai", model
+            # Requested openai but it isn't fully configured — fall back to
+            # anthropic rather than stall (fail-safe against a bad ConfigMap flip).
+            events.emit(
+                "llm.mode_fallback", requested="openai",
+                reason="LLM_BASE_URL empty or VLLM_MODEL unset", active="anthropic",
+            )
+        return anthropic_llm, "anthropic", cfg.llm_model
 
     async with AsyncExitStack() as stack:
         splunk = await stack.enter_async_context(splunk_cm)
@@ -671,6 +725,7 @@ async def run(mock: bool = False) -> None:
                                 error=type(exc).__name__, message=str(exc)[:200])
 
         last_history_refresh = time.monotonic()
+        _last_mode: tuple[str, str, Any] | None = None
         while not stop_event.is_set():
             # Task #56 stage 2: periodically refresh the recurrence snapshot so it
             # doesn't go stale on a long-running pod. Cheap — every N minutes, not
@@ -679,8 +734,21 @@ async def run(mock: bool = False) -> None:
                     and time.monotonic() - last_history_refresh >= cfg.history_refresh_seconds):
                 await _rehydrate_history(history, cfg, state, kind="refresh")
                 last_history_refresh = time.monotonic()
+            # Task #1: resolve the active client from the live provider flag/url
+            # each cycle. Emit llm.mode only on a change (provider/model/url) so a
+            # ConfigMap flip is visible in the event stream without per-cycle spam.
+            active_llm, active_mode, active_model = await _select_llm()
+            _mode_key = (active_mode, active_model, _openai_cache["base"])
+            if _mode_key != _last_mode:
+                events.emit(
+                    "llm.mode", mode=active_mode, model=active_model,
+                    base_url=(_openai_cache["base"] if active_mode == "openai"
+                              else "anthropic-default"),
+                    routed=getattr(active_llm, "_routed", active_mode),
+                )
+                _last_mode = _mode_key
             try:
-                await poll_once(splunk, llm, cfg, state, poster)
+                await poll_once(splunk, active_llm, cfg, state, poster)
             except Exception as exc:
                 events.emit(
                     "poll.failed",
@@ -694,8 +762,8 @@ async def run(mock: bool = False) -> None:
             _touch_heartbeat(cfg.heartbeat_file)
             if mock and hasattr(splunk, "advance"):
                 splunk.advance()
-            if use_mock_llm and hasattr(llm, "cycle"):
-                llm.cycle = splunk.cycle if hasattr(splunk, "cycle") else (llm.cycle + 1)
+            if use_mock_llm and hasattr(mock_llm, "cycle"):
+                mock_llm.cycle = splunk.cycle if hasattr(splunk, "cycle") else (mock_llm.cycle + 1)
             try:
                 await asyncio.wait_for(stop_event.wait(), timeout=cfg.poll_interval_seconds)
             except asyncio.TimeoutError:
@@ -706,6 +774,12 @@ async def run(mock: bool = False) -> None:
             await state_runner.cleanup()
         except Exception:
             log.exception("error stopping state HTTP server")
+
+    if _openai_cache["client"] is not None:
+        try:
+            await _openai_cache["client"].aclose()
+        except Exception:
+            log.exception("error closing openai LLM client")
 
     events.emit("agent.stop", active_stores=state.active_stores())
 
@@ -753,7 +827,7 @@ async def preflight() -> int:
         from anthropic import AsyncAnthropic
         # Same proxy-auth bootstrap as run(), but with a short wait so a
         # preflight against a missing sidecar fails fast instead of hanging.
-        _bootstrap_defenseclaw_proxy_headers(wait_seconds=5)
+        _bootstrap_defenseclaw_proxy_headers(_read_gateway_token(wait_seconds=5))
         client = AsyncAnthropic(api_key=cfg.anthropic_api_key)
         resp = await client.messages.create(
             model=cfg.llm_model,

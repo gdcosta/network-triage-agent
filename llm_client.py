@@ -235,11 +235,18 @@ class LLMClient:
       provider="anthropic" — Anthropic SDK, forced tool_use for structured output.
                              In k8s the SDK's base_url is the DefenseClaw proxy
                              (ANTHROPIC_BASE_URL), so governance is unchanged.
-      provider="openai"    — any OpenAI-compatible /v1 endpoint (self-hosted vLLM
-                             for the #73 A/B). Same schemas, enforced via
-                             response_format=json_schema (guided decoding) instead
-                             of tool_use, so no server-side tool-calling flag is
-                             needed. There is no Anthropic key on this path.
+      provider="openai"    — any OpenAI-compatible /v1 endpoint. Same schemas,
+                             enforced via response_format=json_schema (guided
+                             decoding) instead of tool_use, so no server-side
+                             tool-calling flag is needed. There is no Anthropic
+                             key on this path.
+
+    On the openai path, base_url points at whatever OpenAI-compatible endpoint the
+    caller wants: the DIRECT vLLM box (local dev / the #73 A/B harness), or — in
+    k8s — the loopback LLM guardrail shim in the DefenseClaw sidecar (task #1),
+    which inspects the prompt and forwards to the box holding the vLLM token. This
+    client is dialect-only; it doesn't know or care which, so it sends no token of
+    its own weight (the shim injects the real one). See kl-governance/llm_shim.py.
     """
 
     def __init__(
@@ -262,17 +269,29 @@ class LLMClient:
         self._soul = Path(soul_path).read_text(encoding="utf-8")
         if provider == "openai":
             # Full endpoint (avoid httpx base_url path-join surprises with the
-            # leading-slash /chat/completions). base_url includes /v1.
+            # leading-slash /chat/completions). base_url includes /v1. In k8s this
+            # is the sidecar shim's loopback; the harness points it at the box.
             self._endpoint = base_url.rstrip("/") + "/chat/completions"
+            # Bearer is passed for the direct-to-box harness path; when base_url is
+            # the sidecar shim, the shim ignores it and injects the real vLLM key.
             self._http = httpx.AsyncClient(
                 headers={"Authorization": f"Bearer {vllm_api_key}"},
                 timeout=httpx.Timeout(120.0),  # vLLM triage passes run ~5-10s
             )
             self._client = None
+            self._routed = "openai"
         else:
             self._client = AsyncAnthropic(api_key=api_key)
             self._http = None
             self._endpoint = ""
+            self._routed = "anthropic-sdk"
+
+    async def aclose(self) -> None:
+        """Release the httpx client (openai path). Called when the live toggle
+        rebuilds the openai client for a new box URL, and on shutdown. No-op on
+        the anthropic path (the SDK manages its own transport)."""
+        if self._http is not None:
+            await self._http.aclose()
 
     async def detection_pass(
         self,

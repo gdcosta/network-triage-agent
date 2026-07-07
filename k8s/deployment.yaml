@@ -114,6 +114,23 @@ spec:
             # namespace as the sidecar, so 127.0.0.1:4000 reaches the proxy.
             - name: ANTHROPIC_BASE_URL
               value: http://127.0.0.1:4000
+            # Task #1: the openai/vLLM path posts to the LLM guardrail SHIM in the
+            # DefenseClaw sidecar (loopback :4100), NOT direct to the box. The shim
+            # inspects the prompt (/api/v1/inspect/request) + forwards to the box
+            # holding the vLLM token — so the agent holds no token and the SIDECAR
+            # egresses to the box. (DefenseClaw's own :4000 proxy can't route to a
+            # custom vLLM host — hence the first-party shim; see kl-governance/
+            # llm_shim.py + k8s/README.md.) This target is STATIC.
+            - name: LLM_BASE_URL
+              value: http://127.0.0.1:4100/v1
+            # Provider + model are toggled LIVE (no pod restart) via kl-triage-config
+            # ConfigMap files, resolved fresh each cycle:
+            #   /config/llm_provider   anthropic | openai
+            #   /config/vllm_model     Qwen/Qwen3-30B-A3B-Instruct-2507-FP8
+            # The BOX url lives in the ConfigMap key `vllm_target` and is read by the
+            # SHIM (sidecar), not the agent — so a relaunched box (new IP) is a
+            # ConfigMap patch with no restart. Absent files → env defaults
+            # (LLM_PROVIDER defaults to anthropic). Flip-back to anthropic is instant.
             - name: SOUL_PATH
               value: /config/SOUL.md
             - name: STORE_REGISTRY_PATH
@@ -295,11 +312,41 @@ spec:
             # HEC token is present. Disable with USAGE_RELAY_ENABLED=false.
             - name: USAGE_SPOOL_DIR
               value: /var/run/usage
+            # Task #1: LLM guardrail shim. Governs the agent's self-hosted vLLM
+            # calls (the agent posts to 127.0.0.1:4100; the shim inspects via
+            # /api/v1/inspect/request + forwards to the box holding the token).
+            - name: LLM_SHIM_ENABLED
+              value: "true"
+            - name: LLM_SHIM_PORT
+              value: "4100"
+            # Box /v1 base URL — read LIVE from the kl-triage-config ConfigMap key
+            # `vllm_target` (mounted at /config below), so a relaunched box (new
+            # IP) is a ConfigMap patch, no restart. Set it with:
+            #   kubectl -n net-triage-agent patch configmap kl-triage-config \
+            #     --type merge -p '{"data":{"vllm_target":"http://<box-ip>:8000/v1"}}'
+            - name: VLLM_TARGET_FILE
+              value: /config/vllm_target
+            # Inspect scan tuning vs DefenseClaw's HARD 200ms scan budget: how many
+            # bytes of the (untrusted user) prompt the shim sends to
+            # /api/v1/inspect/request. The SOUL system prompt is never sent (trusted
+            # + halves the payload). Lower this if inspects still 504 (fail-open,
+            # un-inspected); raise if shim.inspect.sent shows headroom. Env-tunable
+            # via a rollout — no image rebuild.
+            - name: DEFENSECLAW_INSPECT_MAX_CHARS
+              value: "24000"
+            # vLLM upstream token — the SIDECAR holds it (agent never does). Keyless
+            # box today → leave unset (shim sends no Authorization). Task #2 wires
+            # this from a Secret:  valueFrom: { secretKeyRef: kl-vllm-secrets/VLLM_API_KEY }
+            # - name: VLLM_API_KEY
+            #   valueFrom: { secretKeyRef: { name: kl-vllm-secrets, key: VLLM_API_KEY } }
           ports:
             - name: guardrail
               containerPort: 4000
             - name: sidecar-api
               containerPort: 18970
+            # LLM shim listener (127.0.0.1 only — declared for topology clarity).
+            - name: llm-shim
+              containerPort: 4100
             # Proxy listener (127.0.0.1 only — not really reachable via this
             # port name, but declaring it makes the topology self-documenting).
             - name: mcp-proxy
@@ -307,6 +354,13 @@ spec:
           volumeMounts:
             - name: defenseclaw-state
               mountPath: /defenseclaw/.defenseclaw
+            # Task #1: read-only view of the kl-triage-config ConfigMap so the LLM
+            # shim can read the live box URL from /config/vllm_target (ConfigMap
+            # edits propagate here → new box IP with no restart). Same ConfigMap the
+            # agent mounts; SOUL.md etc. are just unused by the sidecar.
+            - name: config
+              mountPath: /config
+              readOnly: true
             # Task #55: writable mount of the shared in-memory volume. The
             # entrypoint derives identity.json (deviceId + gateway token) here
             # once the gateway has booted, for the agent container to consume.
@@ -321,7 +375,11 @@ spec:
               cpu: 150m         # +50m for the Python proxy idle
               memory: 256Mi     # Python + mcp SDK + Go gateway resident at idle
             limits:
-              cpu: 1000m        # bumped for occasional Node mcp-remote subprocesses (one per agent call)
+              # 2000m (task #1): the LLM shim's inspect call has a HARD 200ms
+              # wall-clock scan budget in DefenseClaw; at 1000m it was starved
+              # during the drill-cycle Node subprocess storm → 504 → fail-open.
+              # More CPU headroom lets the scan complete in-budget.
+              cpu: 2000m        # was 1000m; +Node mcp-remote subprocesses (one per agent call) + inspect scan
               # Per-call model spawns one `npx mcp-remote` Node process (~100-150Mi)
               # per splunk_run_query; a drill cycle fires up to ~9 concurrently. At
               # 512Mi the proxy was OOM-killed (SIGKILL) under that load → sidecar
