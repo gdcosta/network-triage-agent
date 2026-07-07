@@ -123,6 +123,11 @@ spec:
             # llm_shim.py + k8s/README.md.) This target is STATIC.
             - name: LLM_BASE_URL
               value: http://127.0.0.1:4100/v1
+            # Qwen3 DENSE models (Qwen3-32B) are hybrid-thinking; disable it so the
+            # structured detection runs in direct non-thinking mode. Only affects
+            # the openai/vLLM path; non-thinking models ignore the kwarg harmlessly.
+            - name: VLLM_DISABLE_THINKING
+              value: "true"
             # Provider + model are toggled LIVE (no pod restart) via kl-triage-config
             # ConfigMap files, resolved fresh each cycle:
             #   /config/llm_provider   anthropic | openai

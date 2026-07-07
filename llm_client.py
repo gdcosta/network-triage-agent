@@ -430,6 +430,16 @@ class LLMClient:
                 "json_schema": {"name": tool["name"], "schema": schema},
             },
         }
+        # Qwen3 DENSE models (e.g. Qwen3-32B) are HYBRID thinking models — they
+        # default to emitting a <think> block before the answer. Our structured
+        # detection wants direct non-thinking output, so pass the chat-template
+        # switch through vLLM when VLLM_DISABLE_THINKING is set. Guided decoding
+        # already forces valid JSON, but running a thinking model with thinking
+        # merely suppressed-by-grammar (rather than properly disabled) muddies the
+        # quality read. Harmless on templates that don't use the kwarg (e.g. the
+        # -Instruct-2507 non-thinking MoE); gated so it only touches the vLLM path.
+        if os.environ.get("VLLM_DISABLE_THINKING", "").strip().lower() in ("1", "true", "yes"):
+            payload["chat_template_kwargs"] = {"enable_thinking": False}
         resp = await self._http.post(self._endpoint, json=payload)
         if resp.status_code >= 400:
             # Surface vLLM's actual reason (context-length, schema, etc.) instead of
