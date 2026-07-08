@@ -299,7 +299,9 @@ class LLMClient:
         previous_alerts: dict[str, Any],
         recurrence: dict[str, Any] | None = None,
     ) -> DetectionDecision:
-        user_msg = _detection_prompt(scan_data, previous_alerts, recurrence)
+        user_msg = _detection_prompt(
+            scan_data, previous_alerts, recurrence, compact=self._provider == "openai"
+        )
         result = await self._call(
             user_text=user_msg,
             tool=DETECTION_TOOL,
@@ -330,7 +332,39 @@ class LLMClient:
         previous_alerts: dict[str, Any],
         recurrence: dict[str, Any] | None = None,
     ) -> TriageReports:
-        user_msg = _triage_prompt(scan_data, drill_data, previous_alerts, recurrence)
+        # The triage drill payload grows ~7-8K tokens PER correlated store, so on the
+        # context-bounded self-hosted path (vLLM/Qwen, 32K window) a multi-store
+        # correlation overflows — 2 stores measured ~29-30K vs a 28,672 input budget,
+        # while 1 store fits at ~19.6K. Chunk it ONE STORE PER CALL so every prompt
+        # stays single-store sized (~9K of headroom), regardless of fault fan-out.
+        # Trade-off (vLLM path only): cross-store SYNTHESIS — WIDESPREAD scope /
+        # shared-root-cause incident merging — is deferred to the interactive bot;
+        # per-store dedup is preserved (previous_alerts passed to each call) and
+        # over-alerting is acceptable (a human/bot correlates). The frontier path
+        # (Anthropic/Haiku, 200K) keeps the single all-at-once call with full
+        # cross-store visibility — it has the window and doesn't get confused by the
+        # fan-out. Detection still correlates across all stores upstream either way.
+        if self._provider == "openai" and len(drill_data) > 1:
+            merged: list[dict[str, Any]] = []
+            for store, drills in drill_data.items():
+                part = await self._triage_call(
+                    scan_data, {store: drills}, previous_alerts, recurrence
+                )
+                merged.extend(part.reports)
+            return TriageReports(reports=merged, raw={"reports": merged})
+        return await self._triage_call(scan_data, drill_data, previous_alerts, recurrence)
+
+    async def _triage_call(
+        self,
+        scan_data: dict[str, list[dict]],
+        drill_data: dict[str, dict[str, list[dict]]],
+        previous_alerts: dict[str, Any],
+        recurrence: dict[str, Any] | None = None,
+    ) -> TriageReports:
+        user_msg = _triage_prompt(
+            scan_data, drill_data, previous_alerts, recurrence,
+            compact=self._provider == "openai",
+        )
         result = await self._call(
             user_text=user_msg,
             tool=TRIAGE_TOOL,
@@ -475,10 +509,43 @@ class LLMClient:
 
 # ---------- prompt construction ----------
 
+# Telemetry rendering is provider-aware. The frontier path (Anthropic/Haiku, 200K
+# window) gets indented JSON — readable, and it has the context to spare. The
+# self-hosted path (vLLM/Qwen, ~32K window) gets COMPACT JSON: the indent=2
+# whitespace alone is a large fraction of the telemetry tokens, and a WAN-fault
+# fan-out has overflowed 32K by a hair (seen 2026-07-08: input 28673 + 4096 out =
+# 32769). Compact separators are signal-LOSSLESS — same fields, same rows, only
+# whitespace goes — so the model reasons over identical data, just denser. Keyed
+# off the provider the agent already resolves per cycle (task #1 live toggle), so
+# Haiku's prompt is byte-for-byte unchanged.
+def _dump(obj: Any, compact: bool) -> str:
+    if compact:
+        return json.dumps(obj, separators=(",", ":"), default=str)
+    return json.dumps(obj, indent=2, default=str)
+
+
+# Opt-in last-resort per-section row cap for the context-bounded path, for an
+# extreme fault fan-out where compact rendering alone still overflows 32K. This is
+# signal-LOSSY (it drops rows), so it defaults OFF and marks the omission loudly
+# rather than truncating silently. Tune via the VLLM_TELEMETRY_MAX_ROWS knob
+# (ConfigMap/env); 0 = disabled. Only the self-hosted (compact) path is affected.
+def _cap_rows(rows: Any, compact: bool) -> Any:
+    if not compact or not isinstance(rows, list):
+        return rows
+    cap = int(os.environ.get("VLLM_TELEMETRY_MAX_ROWS", "0") or "0")
+    if cap and len(rows) > cap:
+        dropped = len(rows) - cap
+        return rows[:cap] + [
+            {"_truncated": f"{dropped} more rows omitted to fit the local model's context window"}
+        ]
+    return rows
+
+
 def _detection_prompt(
     scan_data: dict[str, list[dict]],
     previous_alerts: dict[str, Any],
     recurrence: dict[str, Any] | None = None,
+    compact: bool = False,
 ) -> str:
     # Task #56 stage 2: compact per-store recurrence context from the agent's OWN
     # past alerts. PRIOR context only — the scans below still decide what's firing
@@ -493,7 +560,7 @@ def _detection_prompt(
             "(raise confidence, note the pattern); a store with little/no history "
             "that suddenly alerts is novel. Only the scans below decide whether "
             "something is firing right now.\n```json\n"
-            f"{json.dumps(recurrence, indent=2, default=str)}\n```\n\n"
+            f"{_dump(recurrence, compact)}\n```\n\n"
         )
     return (
         "PHASE: detection\n\n"
@@ -504,12 +571,12 @@ def _detection_prompt(
         "have recovered.\n\n"
         "Call the detection_decision tool with your decision.\n\n"
         f"## previous_alerts (open alerts as of last poll)\n```json\n"
-        f"{json.dumps(previous_alerts, indent=2, default=str)}\n```\n\n"
+        f"{_dump(previous_alerts, compact)}\n```\n\n"
         f"{recurrence_block}"
-        f"## scan_sdwan\n```json\n{json.dumps(scan_data.get('sdwan', []), indent=2, default=str)}\n```\n\n"
-        f"## scan_te\n```json\n{json.dumps(scan_data.get('te', []), indent=2, default=str)}\n```\n\n"
-        f"## scan_meraki\n```json\n{json.dumps(scan_data.get('meraki', []), indent=2, default=str)}\n```\n\n"
-        f"## scan_ise\n```json\n{json.dumps(scan_data.get('ise', []), indent=2, default=str)}\n```\n"
+        f"## scan_sdwan\n```json\n{_dump(_cap_rows(scan_data.get('sdwan', []), compact), compact)}\n```\n\n"
+        f"## scan_te\n```json\n{_dump(_cap_rows(scan_data.get('te', []), compact), compact)}\n```\n\n"
+        f"## scan_meraki\n```json\n{_dump(_cap_rows(scan_data.get('meraki', []), compact), compact)}\n```\n\n"
+        f"## scan_ise\n```json\n{_dump(_cap_rows(scan_data.get('ise', []), compact), compact)}\n```\n"
     )
 
 
@@ -518,6 +585,7 @@ def _triage_prompt(
     drill_data: dict[str, dict[str, list[dict]]],
     previous_alerts: dict[str, Any],
     recurrence: dict[str, Any] | None = None,
+    compact: bool = False,
 ) -> str:
     parts = [
         "PHASE: triage\n\n"
@@ -526,11 +594,11 @@ def _triage_prompt(
         "stages, then emit your send/skip dedup verdict per the SOUL "
         "DEDUPLICATION rules using previous_alerts.\n\n"
         "Call the submit_triage_reports tool with one entry per store.\n\n"
-        f"## previous_alerts\n```json\n{json.dumps(previous_alerts, indent=2, default=str)}\n```\n",
+        f"## previous_alerts\n```json\n{_dump(previous_alerts, compact)}\n```\n",
     ]
     parts.append(
         f"\n## scan_summary (carry-forward context)\n```json\n"
-        f"{json.dumps({k: len(v) for k, v in scan_data.items()}, indent=2)}\n```\n"
+        f"{_dump({k: len(v) for k, v in scan_data.items()}, compact)}\n```\n"
     )
     # Task #56 stage 3: prior-alert recurrence for the stores being triaged, so
     # the report's confidence / severity / notes can weight a recurring vs a novel
@@ -545,12 +613,12 @@ def _triage_prompt(
             "the same root cause confirms the pattern (raise confidence; note it "
             "in the card); a repeatedly-seen ISP/external cause is a known issue, "
             "not a new store fault.\n```json\n"
-            f"{json.dumps(relevant, indent=2, default=str)}\n```\n"
+            f"{_dump(relevant, compact)}\n```\n"
         )
     for store, drills in drill_data.items():
         parts.append(f"\n## drill_results for store {store}\n")
         for kind, rows in drills.items():
             parts.append(
-                f"\n### {kind}\n```json\n{json.dumps(rows, indent=2, default=str)}\n```\n"
+                f"\n### {kind}\n```json\n{_dump(_cap_rows(rows, compact), compact)}\n```\n"
             )
     return "".join(parts)
