@@ -516,7 +516,9 @@ async def get_recent_cycle() -> dict[str, Any]:
 
 
 @mcp.tool()
-async def get_alert_history(store_id: str | None = None, hours: int = 24) -> dict[str, Any]:
+async def get_alert_history(
+    store_id: str | None = None, hours: int = 24, limit: int = 500
+) -> dict[str, Any]:
     """Authoritative history of a store's PAST ALERTS, as recorded by the triage agent.
 
     USE THIS for ANY question about a store's alert history, past alerts,
@@ -533,17 +535,27 @@ async def get_alert_history(store_id: str | None = None, hours: int = 24) -> dic
       store_id: optional — limit to a specific store. If omitted, returns
         events for all stores in the time window.
       hours: how far back to look (default 24, max 168).
+      limit: max events returned, most-recent first (default 500, bounded by the
+        server row limit). A ~7-day window at typical volume is ~450 events; the
+        old hardcoded 100 only reached ~1.5 days on a busy week, so raise this
+        for a full multi-day timeline.
 
     Returns:
-      {"source": "splunk_history", "hours": int, "store": str|null,
-       "event_count": int, "events": [ {ts, store, severity, scope,
-       root_cause, action, dedup_decision, ...}, ... ]} on success
+      {"source": "splunk_history", "hours": int, "limit": int, "truncated": bool,
+       "store": str|null, "event_count": int, "events": [ {ts, store, severity,
+       scope, root_cause, action, dedup_decision, ...}, ... ]} on success
       {"error": "<reason>"} on failure
     """
     if not _SPLUNK_CONFIGURED:
         return {"error": "splunk_unavailable"}
     if hours <= 0 or hours > 168:
         return {"error": "invalid_hours", "detail": "hours must be 1..168"}
+    # Cap event count (most-recent-first), bounded by the server row limit so a wide
+    # window can't pull an unbounded set into the bot's context. Default 500 covers a
+    # ~7-day timeline at typical volume; the old hardcoded 100 truncated a busy week
+    # to ~1.5 days. The events are already projected to compact fields below, so this
+    # bounds count, not per-event size.
+    limit = max(1, min(limit, SPLUNK_ROW_LIMIT))
     earliest = f"-{hours}h"
 
     if store_id:
@@ -560,12 +572,12 @@ async def get_alert_history(store_id: str | None = None, hours: int = 24) -> dic
     spl = (
         f'search index={TRIAGE_EVENT_INDEX} sourcetype="kube:container:triage-agent" '
         f'"triage.report" event="triage.report" {store_clause}earliest={earliest} '
-        f'| sort -_time | head 100 | table _time _raw'
+        f'| sort -_time | head {limit} | table _time _raw'
     )
     try:
         rows = await _query_splunk(
             spl, earliest, "now",
-            cache_key=f"history:{store_id or 'all'}:{hours}h",
+            cache_key=f"history:{store_id or 'all'}:{hours}h:{limit}",
         )
     except DefenseClawBlocked as e:
         return {"error": "blocked_by_policy", "reason": str(e),
@@ -598,6 +610,8 @@ async def get_alert_history(store_id: str | None = None, hours: int = 24) -> dic
     return {
         "source": "splunk_history",
         "hours": hours,
+        "limit": limit,
+        "truncated": len(parsed) >= limit,
         "store": store_id,
         "event_count": len(parsed),
         "events": parsed,
