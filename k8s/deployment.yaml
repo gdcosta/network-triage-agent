@@ -339,11 +339,20 @@ spec:
             # via a rollout — no image rebuild.
             - name: DEFENSECLAW_INSPECT_MAX_CHARS
               value: "24000"
-            # vLLM upstream token — the SIDECAR holds it (agent never does). Keyless
-            # box today → leave unset (shim sends no Authorization). Task #2 wires
-            # this from a Secret:  valueFrom: { secretKeyRef: kl-vllm-secrets/VLLM_API_KEY }
-            # - name: VLLM_API_KEY
-            #   valueFrom: { secretKeyRef: { name: kl-vllm-secrets, key: VLLM_API_KEY } }
+            # vLLM upstream token — the SIDECAR holds it (agent never does). Task #2:
+            # wired from the kl-vllm-secrets Secret. `optional: true` keeps this safe
+            # to apply during the live soak: if the Secret is absent (or the box is
+            # still keyless) VLLM_API_KEY is simply unset and the shim sends no
+            # Authorization — no CreateContainerConfigError, no broken poll loop. Once
+            # the Secret exists AND the box enforces --api-key, roll the pod to pick it
+            # up, then verify the box 401s an un-authenticated request (proves auth is
+            # actually enforced, not just that a header is sent).
+            - name: VLLM_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: kl-vllm-secrets
+                  key: VLLM_API_KEY
+                  optional: true
           ports:
             - name: guardrail
               containerPort: 4000
