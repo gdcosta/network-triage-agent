@@ -222,6 +222,19 @@ spec:
               value: triage-mcp
             - name: DEFENSECLAW_AGENT_NAME
               value: "Triage MCP"
+            # Governance telemetry: enable DefenseClaw's native OTLP export so
+            # triage-mcp's guardrail/inspect verdicts join the agent + bot in
+            # O11y + linda. Entrypoint appends the otel: block from this flag;
+            # endpoint = the node's OTLP receiver (K8S_NODE_IP:4317, downward API).
+            # REQUIRES the host:4317 egress rule (cilium-egress-policy.yaml
+            # triage-mcp-egress) or the push is silently dropped. Rolling this pod
+            # pulls the already-rebuilt shared sidecar image.
+            - name: DEFENSECLAW_OTEL_ENABLED
+              value: "true"
+            - name: K8S_NODE_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.hostIP
           ports:
             - name: guardrail
               containerPort: 4000

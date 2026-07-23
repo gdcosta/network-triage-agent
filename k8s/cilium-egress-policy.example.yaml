@@ -153,6 +153,16 @@ spec:
               protocol: TCP
             - port: "8088"
               protocol: TCP
+    # DefenseClaw OTLP export (governance metrics -> O11y + linda) — the sidecar
+    # pushes OTLP to its OWN node's OTel-agent receiver (K8S_NODE_IP:4317). Pod->
+    # local-node is the Cilium `host` entity (NOT a toCIDR — node IP moves with
+    # scheduling). Without this the default-deny egress silently drops the push.
+    - toEntities:
+        - host
+      toPorts:
+        - ports:
+            - port: "4317"
+              protocol: TCP
     # agent /state — triage-mcp pulls the agent's live state to serve the bot
     - toEndpoints:
         - matchLabels:
