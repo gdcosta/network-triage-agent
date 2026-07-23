@@ -106,6 +106,18 @@ spec:
         - ports:
             - port: "8081"
               protocol: TCP
+    # DefenseClaw OTLP export (governance metrics -> cluster OTel collector ->
+    # O11y + linda). The sidecar pushes OTLP to its OWN node's OTel-agent receiver
+    # (K8S_NODE_IP:4317). Pod->local-node is the Cilium `host` entity (NOT a
+    # toCIDR — the node IP changes with scheduling). Without this, the default-deny
+    # egress silently drops the push. Gated by DEFENSECLAW_OTEL_ENABLED; harmless
+    # when off. Only needed if you enable DefenseClaw's native OTLP export.
+    - toEntities:
+        - host
+      toPorts:
+        - ports:
+            - port: "4317"
+              protocol: TCP
 ---
 apiVersion: cilium.io/v2
 kind: CiliumNetworkPolicy
