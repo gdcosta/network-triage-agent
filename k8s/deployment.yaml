@@ -310,6 +310,17 @@ spec:
               value: kl-triage-agent
             - name: DEFENSECLAW_AGENT_NAME
               value: "KL Triage Agent"
+            # Governance telemetry: turn ON DefenseClaw's native OTLP export
+            # (metrics) — the entrypoint appends the otel: block from this flag.
+            # Endpoint = the node's OTel-agent OTLP receiver (K8S_NODE_IP:4317 via
+            # downward API); the cluster collector fans it out to O11y + linda.
+            # Per-workload — bot/triage-mcp stay off until they set this too.
+            - name: DEFENSECLAW_OTEL_ENABLED
+              value: "true"
+            - name: K8S_NODE_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.hostIP
             # Task #69a: the sidecar drains this shared spool (written by the
             # agent) and POSTs each usage event to linda HEC using the
             # SPLUNK_HEC_TOKEN it already holds (kl-defenseclaw-secrets). The
