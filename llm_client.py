@@ -29,6 +29,28 @@ import httpx
 from anthropic import AsyncAnthropic
 
 import events
+import tracing
+
+
+def _provider_labels(provider: str) -> tuple[str, str]:
+    """(gen_ai.system, peer.service) for the LLM span. vLLM speaks the OpenAI dialect
+    but shows as its own `vllm` node on the APM service map."""
+    if provider == "openai":
+        return "openai", "vllm"
+    return "anthropic", "anthropic"
+
+
+def _llm_usage_attrs(result: dict[str, Any]) -> dict[str, Any]:
+    """GenAI token attributes from a call result (set after the call returns)."""
+    usage = result.get("usage", {}) or {}
+    stop = result.get("stop_reason")
+    return {
+        "gen_ai.usage.input_tokens": usage.get("input_tokens"),
+        "gen_ai.usage.output_tokens": usage.get("output_tokens"),
+        "kl.cache_read": usage.get("cache_read_input_tokens", 0),
+        "kl.cache_create": usage.get("cache_creation_input_tokens", 0),
+        "gen_ai.response.finish_reasons": [stop] if stop else None,
+    }
 
 
 def _require_all(schema: dict[str, Any]) -> dict[str, Any]:
@@ -302,10 +324,18 @@ class LLMClient:
         user_msg = _detection_prompt(
             scan_data, previous_alerts, recurrence, compact=self._provider == "openai"
         )
-        result = await self._call(
-            user_text=user_msg,
-            tool=DETECTION_TOOL,
-        )
+        _sys, _peer = _provider_labels(self._provider)
+        with tracing.span(
+            "llm.detection", kind="CLIENT",
+            **{"gen_ai.operation.name": "chat", "gen_ai.system": _sys,
+               "gen_ai.request.model": self._model, "peer.service": _peer,
+               "kl.phase": "detection"},
+        ) as _sp:
+            result = await self._call(
+                user_text=user_msg,
+                tool=DETECTION_TOOL,
+            )
+            tracing.annotate(_sp, **_llm_usage_attrs(result))
         events.emit(
             "llm.detection_pass",
             model=self._model,
@@ -365,10 +395,18 @@ class LLMClient:
             scan_data, drill_data, previous_alerts, recurrence,
             compact=self._provider == "openai",
         )
-        result = await self._call(
-            user_text=user_msg,
-            tool=TRIAGE_TOOL,
-        )
+        _sys, _peer = _provider_labels(self._provider)
+        with tracing.span(
+            "llm.triage", kind="CLIENT",
+            **{"gen_ai.operation.name": "chat", "gen_ai.system": _sys,
+               "gen_ai.request.model": self._model, "peer.service": _peer,
+               "kl.phase": "triage", "kl.stores": len(drill_data)},
+        ) as _sp:
+            result = await self._call(
+                user_text=user_msg,
+                tool=TRIAGE_TOOL,
+            )
+            tracing.annotate(_sp, **_llm_usage_attrs(result))
         events.emit(
             "llm.triage_pass",
             model=self._model,

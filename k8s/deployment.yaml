@@ -220,6 +220,38 @@ spec:
               value: kl-triage
             - name: WORKLOAD_FLEET_NAME
               value: "KL Triage"
+            # APM tracing (Phase 1) — each poll cycle becomes a `triage.cycle`
+            # distributed trace → O11y APM, off the SAME node OTLP receiver +
+            # host:4317 egress the sidecar's governance/token metrics already use
+            # (pod-scoped egress already covers this container — no CNP change).
+            # Gated: tracing.py is inert unless KL_TRACING_ENABLED=true, so this is
+            # a pure runtime toggle. K8S_NODE_IP FIRST so $(K8S_NODE_IP) below
+            # expands (k8s env interpolation is order-sensitive within a container).
+            - name: K8S_NODE_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.hostIP
+            # POD_NAME via downward API so $(POD_NAME) below interpolates (k8s only
+            # expands env vars declared in this same list — the runtime's HOSTNAME
+            # is NOT in the list and would be left literal).
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: KL_TRACING_ENABLED
+              value: "true"
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: "http://$(K8S_NODE_IP):4317"
+            - name: OTEL_EXPORTER_OTLP_PROTOCOL
+              value: "grpc"
+            - name: OTEL_SERVICE_NAME
+              value: kl-triage-agent
+            # deployment.environment=kl-triage is DELIBERATELY distinct from the
+            # org's shared APM environments (production/workshop/…) so the KL
+            # service map stays isolated. kl.kind/kl.fleet mirror the #70 identity
+            # so the APM service lines up with the token-metric dims.
+            - name: OTEL_RESOURCE_ATTRIBUTES
+              value: "deployment.environment=kl-triage,kl.kind=agent,kl.fleet=$(WORKLOAD_FLEET),service.instance.id=$(POD_NAME)"
           ports:
             - name: state
               containerPort: 8080

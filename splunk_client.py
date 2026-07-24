@@ -26,6 +26,7 @@ from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
 import events
+import tracing
 
 log = logging.getLogger(__name__)
 
@@ -130,19 +131,27 @@ class SplunkClient:
         if self._session is None:
             raise RuntimeError("SplunkClient not opened — use 'async with'")
 
-        result = await self._session.call_tool(
-            self._tool_name,
-            arguments={
-                "query": spl,
-                "earliest_time": earliest_time,
-                "latest_time": latest_time,
-                "row_limit": self._row_limit,
-            },
-        )
-        if getattr(result, "isError", False):
-            raise RuntimeError(f"splunk tool error: {result}")
+        # CLIENT span — nests under whichever cycle stage called us (scan or a
+        # per-store drill), so the drill "storm" shows as parallel children in APM.
+        with tracing.span(
+            "splunk.query", kind="CLIENT",
+            **{"peer.service": "splunk-bob", "kl.tool": self._tool_name,
+               "kl.row_limit": self._row_limit, "kl.spl_prefix": spl[:80]},
+        ) as _sp:
+            result = await self._session.call_tool(
+                self._tool_name,
+                arguments={
+                    "query": spl,
+                    "earliest_time": earliest_time,
+                    "latest_time": latest_time,
+                    "row_limit": self._row_limit,
+                },
+            )
+            if getattr(result, "isError", False):
+                raise RuntimeError(f"splunk tool error: {result}")
 
-        rows, truncated, total = _parse_response(result)
+            rows, truncated, total = _parse_response(result)
+            tracing.annotate(_sp, **{"kl.rows": len(rows), "kl.truncated": truncated})
         if truncated:
             events.emit(
                 "splunk.truncated",

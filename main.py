@@ -38,6 +38,7 @@ from typing import Any, Awaitable, Callable
 import events
 import mcp_inspect
 import queries
+import tracing
 from config import (
     Config,
     current_llm_base_url,
@@ -217,7 +218,20 @@ def _recurrence_summary(events: list[dict], window_hours: int) -> dict[str, Any]
 async def poll_once(
     splunk, llm: LLMClient, cfg: Config, state: AlertState, poster: Poster,
 ) -> None:
+    """Root trace span per cycle (SERVER, so APM derives per-cycle RED metrics), then
+    delegate to _run_cycle. The span stays current across the awaited inner call, so
+    every stage/LLM/query span nests under it. Pure side-channel — a no-op when
+    KL_TRACING_ENABLED is off."""
+    with tracing.span("triage.cycle", kind="SERVER") as _cyc:
+        await _run_cycle(splunk, llm, cfg, state, poster, _cyc)
+
+
+async def _run_cycle(
+    splunk, llm: LLMClient, cfg: Config, state: AlertState, poster: Poster,
+    cyc: Any = None,
+) -> None:
     events.new_cycle()
+    tracing.annotate(cyc, **{"kl.cycle_id": events.latest_cycle()[0]})
     cycle_started = time.monotonic()
     events.emit(
         "poll.start",
@@ -227,12 +241,13 @@ async def poll_once(
     )
 
     # 1. Scan
-    sdwan, te, meraki, ise = await asyncio.gather(
-        splunk.run_query(queries.SCAN_SDWAN, cfg.earliest_time, cfg.latest_time),
-        splunk.run_query(queries.SCAN_TE, cfg.earliest_time, cfg.latest_time),
-        splunk.run_query(queries.SCAN_MERAKI, cfg.earliest_time, cfg.latest_time),
-        splunk.run_query(queries.SCAN_ISE, cfg.earliest_time, cfg.latest_time),
-    )
+    with tracing.span("scan"):
+        sdwan, te, meraki, ise = await asyncio.gather(
+            splunk.run_query(queries.SCAN_SDWAN, cfg.earliest_time, cfg.latest_time),
+            splunk.run_query(queries.SCAN_TE, cfg.earliest_time, cfg.latest_time),
+            splunk.run_query(queries.SCAN_MERAKI, cfg.earliest_time, cfg.latest_time),
+            splunk.run_query(queries.SCAN_ISE, cfg.earliest_time, cfg.latest_time),
+        )
     scan_data = {"sdwan": sdwan, "te": te, "meraki": meraki, "ise": ise}
     events.emit(
         "scan.complete",
@@ -315,6 +330,8 @@ async def poll_once(
 
     # 4. Drill in parallel for each correlated store
     if not decision.correlate_stores:
+        tracing.annotate(cyc, **{"kl.cards_posted": 0, "kl.recoveries": len(ready),
+                                 "kl.outcome": "no_correlation"})
         events.emit(
             "poll.complete",
             duration_ms=int((time.monotonic() - cycle_started) * 1000),
@@ -456,6 +473,8 @@ async def poll_once(
             )
             log.exception("card POST failed for store %s", report.get("store"))
 
+    tracing.annotate(cyc, **{"kl.cards_posted": posted, "kl.recoveries": len(ready),
+                             "kl.reports": len(triage.reports), "kl.outcome": "triaged"})
     events.emit(
         "poll.complete",
         duration_ms=int((time.monotonic() - cycle_started) * 1000),
@@ -468,6 +487,10 @@ async def _run_all_drills(splunk, correlate_stores: list[dict], cfg: Config) -> 
     async def _one(spec: dict) -> tuple[str, dict]:
         store = spec.get("store", "")
         site = spec.get("site", "")
+        with tracing.span("drill.store", **{"kl.store": store, "kl.site": site}):
+            return await _one_inner(spec, store, site)
+
+    async def _one_inner(spec: dict, store: str, site: str) -> tuple[str, dict]:
         events.emit("correlation.start", store=store, site=site, reason=spec.get("reason"))
         drills = await run_drills(splunk, store, site, cfg.earliest_time, cfg.latest_time)
         events.emit(
@@ -606,6 +629,9 @@ async def run(mock: bool = False) -> None:
         earliest=cfg.earliest_time,
         latest=cfg.latest_time,
     )
+    # APM tracing (Phase 1) — gated by KL_TRACING_ENABLED, inert otherwise. Each
+    # poll_once becomes a `triage.cycle` trace → O11y APM. Never fatal.
+    events.emit("tracing.init", enabled=tracing.init_tracing())
     # Mark liveness immediately so the probe has a fresh file before the
     # first (potentially slow) poll cycle finishes.
     _touch_heartbeat(cfg.heartbeat_file)
@@ -781,6 +807,8 @@ async def run(mock: bool = False) -> None:
         except Exception:
             log.exception("error closing openai LLM client")
 
+    # Flush any buffered spans before exit (best-effort; no-op when tracing off).
+    tracing.shutdown()
     events.emit("agent.stop", active_stores=state.active_stores())
 
 
