@@ -252,6 +252,25 @@ spec:
             # so the APM service lines up with the token-metric dims.
             - name: OTEL_RESOURCE_ATTRIBUTES
               value: "deployment.environment=kl-triage,kl.kind=agent,kl.fleet=$(WORKLOAD_FLEET),service.instance.id=$(POD_NAME)"
+            # AI Agent Monitoring (Phase 1b) — emit GenAI Agent/LLM spans + gen_ai.client.*
+            # histograms via the Splunk OTel GenAI utility → O11y AI Agent Monitoring
+            # OPERATIONAL panels (Requests/Errors/Tokens/Cost/Latency). Gated: genai.py is
+            # inert unless KL_GENAI_ENABLED=true (and needs KL_TRACING_ENABLED, above).
+            # REQUIRES the collector's signalfx exporter `send_otlp_histograms: true`
+            # (Helm values) or the histograms are dropped — see the Phase 1b design doc.
+            - name: KL_GENAI_ENABLED
+              value: "true"
+            # span_metric = emit BOTH spans AND the histogram metrics the pages need.
+            - name: OTEL_INSTRUMENTATION_GENAI_EMITTERS
+              value: "span_metric"
+            # NO_CONTENT (scope decision): operational metrics only — NO prompt/response
+            # text to O11y (our prompts carry Splunk log data). Quality/risk evals are
+            # Galileo's job, not O11y. Do NOT change to SPAN_ONLY without a governance call.
+            - name: OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT
+              value: "NO_CONTENT"
+            # AI Agent Monitoring expects delta-temporality histograms.
+            - name: OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE
+              value: "delta"
           ports:
             - name: state
               containerPort: 8080

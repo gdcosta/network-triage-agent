@@ -36,6 +36,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 import events
+import genai
 import mcp_inspect
 import queries
 import tracing
@@ -220,10 +221,12 @@ async def poll_once(
 ) -> None:
     """Root trace span per cycle (SERVER, so APM derives per-cycle RED metrics), then
     delegate to _run_cycle. The span stays current across the awaited inner call, so
-    every stage/LLM/query span nests under it. Pure side-channel — a no-op when
-    KL_TRACING_ENABLED is off."""
+    every stage/LLM/query span nests under it. `agent_scope` wraps the cycle as one GenAI
+    AgentInvocation (Phase 1b → O11y AI Agent Monitoring); the detection/triage LLMInvocations
+    nest under it. Both are pure side-channels — no-ops when KL_TRACING/KL_GENAI are off."""
     with tracing.span("triage.cycle", kind="SERVER") as _cyc:
-        await _run_cycle(splunk, llm, cfg, state, poster, _cyc)
+        with genai.agent_scope("kl-triage-agent"):
+            await _run_cycle(splunk, llm, cfg, state, poster, _cyc)
 
 
 async def _run_cycle(
@@ -632,6 +635,10 @@ async def run(mock: bool = False) -> None:
     # APM tracing (Phase 1) — gated by KL_TRACING_ENABLED, inert otherwise. Each
     # poll_once becomes a `triage.cycle` trace → O11y APM. Never fatal.
     events.emit("tracing.init", enabled=tracing.init_tracing())
+    # GenAI AI Agent Monitoring (Phase 1b) — gated by KL_GENAI_ENABLED; needs tracing on.
+    # Emits AgentInvocation/LLMInvocation spans + gen_ai.client.* histograms → O11y AI
+    # Agent Monitoring (operational panels; NO message content). Never fatal.
+    events.emit("genai.init", enabled=genai.init_genai())
     # Mark liveness immediately so the probe has a fresh file before the
     # first (potentially slow) poll cycle finishes.
     _touch_heartbeat(cfg.heartbeat_file)
@@ -807,7 +814,8 @@ async def run(mock: bool = False) -> None:
         except Exception:
             log.exception("error closing openai LLM client")
 
-    # Flush any buffered spans before exit (best-effort; no-op when tracing off).
+    # Flush any buffered spans + GenAI metrics before exit (best-effort; no-ops when off).
+    genai.shutdown()
     tracing.shutdown()
     events.emit("agent.stop", active_stores=state.active_stores())
 
