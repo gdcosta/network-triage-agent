@@ -133,8 +133,9 @@ class _LLMHandle:
                 self._inv.output_tokens = out_t
                 if stop:
                     self._inv.response_finish_reasons = [stop]
-                self._inv.attributes["kl.cache_read"] = cread
-                self._inv.attributes["kl.cache_create"] = cwrite
+                # cache_read/create are NOT gen_ai fields — the emitter drops custom
+                # attrs, so they'd never reach the span; the sidecar token metrics
+                # (kl_llm_cache_*) capture cache tokens separately.
             except Exception:  # noqa: BLE001
                 pass
         elif self._span is not None:
@@ -159,7 +160,14 @@ def llm_call(model: str, provider: str, phase: str) -> Iterator[_LLMHandle]:
         try:
             from opentelemetry.util.genai.types import LLMInvocation
             inv = LLMInvocation(request_model=model, operation="chat", provider=system)
-            inv.attributes["kl.phase"] = phase
+            # server.address so O11y infers the provider NODE on the APM service map
+            # (vllm / anthropic). The GenAI emitter DROPS custom inv.attributes, but it
+            # emits server.address from this dedicated field, and O11y infers a map node
+            # from server.address. (Phase 1's manual span used peer.service for the same
+            # effect; that node vanished when Phase 1b switched to the GenAI span.) AI
+            # Agent Monitoring is unaffected — it keys on gen_ai.provider.name. `phase` is
+            # not put on the span (the emitter drops it) — it's only the fallback span name.
+            inv.server_address = "vllm" if system == "openai" else "anthropic"
         except Exception as exc:  # noqa: BLE001
             _log.warning("llm_call build failed (%s); falling back to span", exc)
             inv = None

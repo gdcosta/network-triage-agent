@@ -59,6 +59,7 @@ BUG FIX (v1.0.15): asyncio event-loop mismatch resolved.
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
 import logging
 import os
@@ -73,6 +74,7 @@ from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 
 import events
+import tracing
 from splunk_client import SplunkClient
 
 # Load .env for local dev (mirrors what config.py does for the agent). In
@@ -401,7 +403,26 @@ async def _query_splunk(
 
 # ---------------------------- tools --------------------------------------
 
+def _traced(fn):
+    """Wrap an MCP tool handler in a SERVER span named `mcp.<tool>` (Phase 2 APM) so
+    triage-mcp shows as its OWN O11y APM service with each tool as an endpoint; the
+    `splunk.query` CLIENT spans from SplunkClient.run_query nest under it (→ splunk-bob
+    downstream on the map). `functools.wraps` preserves the signature FastMCP introspects
+    for the tool schema (verified). No-op when KL_TRACING_ENABLED is off.
+
+    NOTE: these are STANDALONE traces — the agent/bot call triage-mcp via an `npx
+    mcp-remote` subprocess that doesn't carry W3C traceparent, so triage-mcp's spans are
+    not (yet) stitched into the caller's trace. That cross-process stitching is the
+    deferred hard part of Phase 2; triage-mcp as its own service works without it."""
+    @functools.wraps(fn)
+    async def _wrapper(*args, **kwargs):
+        with tracing.span("mcp." + fn.__name__, kind="SERVER"):
+            return await fn(*args, **kwargs)
+    return _wrapper
+
+
 @mcp.tool()
+@_traced
 async def list_active_alerts() -> dict[str, Any]:
     """List every store the agent currently has an active alert on.
 
@@ -431,6 +452,7 @@ async def list_active_alerts() -> dict[str, Any]:
 
 
 @mcp.tool()
+@_traced
 async def get_alert(store_id: str) -> dict[str, Any]:
     """Get the agent's view of a specific store.
 
@@ -491,6 +513,7 @@ async def get_alert(store_id: str) -> dict[str, Any]:
 
 
 @mcp.tool()
+@_traced
 async def get_recent_cycle() -> dict[str, Any]:
     """Get information about the agent's most recent poll cycle.
 
@@ -516,6 +539,7 @@ async def get_recent_cycle() -> dict[str, Any]:
 
 
 @mcp.tool()
+@_traced
 async def get_alert_history(
     store_id: str | None = None, hours: int = 24, limit: int = 500
 ) -> dict[str, Any]:
@@ -619,6 +643,7 @@ async def get_alert_history(
 
 
 @mcp.tool()
+@_traced
 async def record_feedback(
     rating: str,
     comment: str = "",
@@ -691,6 +716,12 @@ def main() -> None:
     log.info("triage_mcp starting on %s:%d", MCP_HOST, MCP_PORT)
     events.emit("triage_mcp.start", host=MCP_HOST, port=MCP_PORT,
                 agent_state_url=AGENT_STATE_URL)
+    # APM tracing (Phase 2) — gated by KL_TRACING_ENABLED, inert otherwise. Each MCP
+    # tool call becomes a SERVER span → triage-mcp shows as its own O11y APM service
+    # (env kl-triage), with the linda `splunk.query` spans nested under it. NOT genai
+    # (triage-mcp makes no LLM calls). Init before mcp.run() (which blocks on Uvicorn);
+    # the BatchSpanProcessor runs its own thread, independent of Uvicorn's event loop.
+    events.emit("tracing.init", enabled=tracing.init_tracing())
 
     # mcp.run() delegates to Uvicorn which manages its own event loop.
     # _lifespan() runs startup/shutdown INSIDE that loop (httpx client), and each
