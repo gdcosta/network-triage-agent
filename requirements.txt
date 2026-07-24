@@ -8,9 +8,12 @@ aiohttp>=3.9
 # APM tracing (Phase 1) — OTLP/gRPC spans → node:4317 → O11y APM. Only imported
 # when KL_TRACING_ENABLED=true (tracing.py guards the import), but installed
 # unconditionally so the flag is a pure runtime toggle (no rebuild to enable).
-# 1.38+ satisfies the Splunk AI Agent Monitoring floor (Phase 1b) too.
-opentelemetry-sdk>=1.38
-opentelemetry-exporter-otlp-proto-grpc>=1.38
+# PINNED to 1.38.x: splunk-otel-util-genai (Phase 1b) imports opentelemetry._events,
+# which otel-api REMOVED after ~1.42 — a looser floor (>=1.38) lets pip resolve to
+# 1.44 (latest) and the GenAI util then fails to import → GenAI silently falls back
+# to off. 1.38.x still ships _events AND meets the Splunk AI Agent Monitoring floor.
+opentelemetry-sdk==1.38.0
+opentelemetry-exporter-otlp-proto-grpc==1.38.0
 # AI Agent Monitoring (Phase 1b) — Splunk OTel GenAI utility. Emits GenAI
 # Agent/LLM spans + gen_ai.client.* histograms → O11y AI Agent Monitoring. Imported
 # only when KL_GENAI_ENABLED=true (genai.py guards it). >=0.1.15 clears the
