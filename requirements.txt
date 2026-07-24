@@ -5,3 +5,8 @@ python-dotenv>=1.0
 # main.py: opt-in HTTP /state server (only when AGENT_STATE_PORT is set)
 # triage_mcp.py: hosts the MCP SSE transport
 aiohttp>=3.9
+# APM tracing (Phase 1) — OTLP/gRPC spans → node:4317 → O11y APM. Only imported
+# when KL_TRACING_ENABLED=true (tracing.py guards the import), but installed
+# unconditionally so the flag is a pure runtime toggle (no rebuild to enable).
+opentelemetry-sdk>=1.27
+opentelemetry-exporter-otlp-proto-grpc>=1.27

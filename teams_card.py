@@ -15,6 +15,8 @@ from urllib.parse import quote
 
 import httpx
 
+import tracing
+
 # Match a leading "1.", "1)", "12.", " 3) ", etc. at the start of a step.
 # We strip these so the renderer is the single source of numbering.
 _LEADING_NUMBER = re.compile(r"^\s*\d+\s*[.)]\s*")
@@ -320,8 +322,11 @@ def _actions(store: str, splunk_base: str, meraki_base: str) -> list[dict]:
 
 
 async def post_card(webhook_url: str, card: dict[str, Any]) -> None:
-    async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.post(webhook_url, json=card)
-        if resp.status_code >= 400:
-            log.error("Teams webhook %s: %s", resp.status_code, resp.text[:500])
-            resp.raise_for_status()
+    with tracing.span("teams.post", kind="CLIENT",
+                      **{"peer.service": "teams-powerautomate"}) as _sp:
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.post(webhook_url, json=card)
+            tracing.annotate(_sp, **{"http.response.status_code": resp.status_code})
+            if resp.status_code >= 400:
+                log.error("Teams webhook %s: %s", resp.status_code, resp.text[:500])
+                resp.raise_for_status()
