@@ -1,0 +1,27 @@
+# Per-MTok LLM model prices consumed by the DefenseClaw sidecar's usage relay
+# (usage_relay.py) for OTLP cost enrichment — kl_llm_cost_usd_total. Mounted RO
+# at /etc/kl/model_prices.json (MODEL_PRICES_PATH) in the agent sidecar. The
+# relay mtime-reloads it, so editing this ConfigMap reprices FORWARD-ONLY with no
+# pod restart (past counter increments are not repriced; linda events stay the
+# authoritative repriceable surface).
+#
+# CANONICAL SOURCE: kl-governance/model_prices.json — keep the agent (net-triage-
+# agent) and bot (kl-governance) copies in sync when rates change.
+#   Apply: kubectl apply -f k8s/model-prices-configmap.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kl-model-prices
+  namespace: net-triage-agent
+data:
+  model_prices.json: |
+    {
+      "_comment": "Per-million-token USD rates for LLM cost enrichment in the sidecar usage relay (kl_llm_cost_usd_total). Keyed by served model id (the `model` field in each usage spool record). Mounted into agent+bot sidecars as a ConfigMap at /config/model_prices.json and live-reloaded (mtime-cached) — a price change is FORWARD-ONLY (past counter increments are not repriced; linda events remain the authoritative repriceable surface). Rates: input=fresh prompt, output=completion, cache_read=prompt-cache hit, cache_write=prompt-cache creation. Unpriced/local models (self-hosted vLLM/Qwen) resolve to $0 via `_default`.",
+      "_default": { "input": 0.0, "output": 0.0, "cache_read": 0.0, "cache_write": 0.0 },
+
+      "claude-haiku-4-5-20251001": { "input": 1.0, "output": 5.0, "cache_read": 0.10, "cache_write": 1.25 },
+      "claude-3-5-haiku-20241022": { "input": 0.80, "output": 4.0, "cache_read": 0.08, "cache_write": 1.0 },
+
+      "claude-sonnet-5": { "input": 3.0, "output": 15.0, "cache_read": 0.30, "cache_write": 3.75 },
+      "claude-opus-4-8": { "input": 15.0, "output": 75.0, "cache_read": 1.50, "cache_write": 18.75 }
+    }

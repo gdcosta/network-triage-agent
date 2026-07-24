@@ -321,6 +321,16 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: status.hostIP
+            # Token-metrics: turn ON the usage relay's OTLP token emitter. The
+            # relay reads the same #69a spool and, per event, increments cumulative
+            # kl_llm_* counters (cost priced from MODEL_PRICES_PATH) and pushes them
+            # via OTLP to K8S_NODE_IP:4317 → O11y + linda k8s_ws_metrics (the same
+            # collector path DefenseClaw governance metrics use). Needs K8S_NODE_IP
+            # (above) + the host:4317 Cilium egress rule. Off → HEC drain only.
+            - name: KL_TOKEN_OTLP_ENABLED
+              value: "true"
+            - name: MODEL_PRICES_PATH
+              value: /etc/kl/model_prices.json
             # Task #69a: the sidecar drains this shared spool (written by the
             # agent) and POSTs each usage event to linda HEC using the
             # SPLUNK_HEC_TOKEN it already holds (kl-defenseclaw-secrets). The
@@ -395,6 +405,12 @@ spec:
             # entrypoint's relay loop drains it to linda HEC.
             - name: usage-spool
               mountPath: /var/run/usage
+            # Token-metrics: per-MTok model prices for the relay's OTLP cost
+            # enrichment (kl_llm_cost_usd_total). ConfigMap → live-reloaded; a
+            # price change is forward-only (mounted RO).
+            - name: model-prices
+              mountPath: /etc/kl
+              readOnly: true
           resources:
             requests:
               cpu: 150m         # +50m for the Python proxy idle
@@ -456,3 +472,10 @@ spec:
           emptyDir:
             medium: Memory
             sizeLimit: 16Mi
+        # Token-metrics: per-MTok model prices consumed by the sidecar usage
+        # relay's OTLP cost enrichment. Shared shape with the bot (kl-governance);
+        # apply k8s/model-prices-configmap.yaml. Editing the ConfigMap reprices
+        # forward-only (no restart — the relay mtime-reloads it).
+        - name: model-prices
+          configMap:
+            name: kl-model-prices
