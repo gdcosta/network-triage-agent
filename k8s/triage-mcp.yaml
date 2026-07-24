@@ -162,6 +162,33 @@ spec:
             # the inspect API is the sidecar's :18970 (same pod, loopback).
             - name: DEFENSECLAW_INSPECT_ENABLED
               value: "true"
+            # APM tracing (Phase 2) — each MCP tool call → a SERVER span, so triage-mcp
+            # shows as its own O11y APM service (env kl-triage) with the linda
+            # `splunk.query` spans nested under it. Same node OTLP receiver + host:4317
+            # egress the sidecar's governance metrics use (triage-mcp-egress already has
+            # the host:4317 rule). Gated: tracing.py is inert unless KL_TRACING_ENABLED.
+            # NOT genai (triage-mcp makes no LLM calls). K8S_NODE_IP first so the
+            # $(K8S_NODE_IP) endpoint expands (k8s env interpolation is order-sensitive).
+            - name: K8S_NODE_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.hostIP
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: KL_TRACING_ENABLED
+              value: "true"
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: "http://$(K8S_NODE_IP):4317"
+            - name: OTEL_EXPORTER_OTLP_PROTOCOL
+              value: "grpc"
+            - name: OTEL_SERVICE_NAME
+              value: triage-mcp
+            # Same kl-triage APM environment as the agent (needs the collector
+            # deployment.environment=insert fix). kl.kind=mcp distinguishes it.
+            - name: OTEL_RESOURCE_ATTRIBUTES
+              value: "deployment.environment=kl-triage,kl.kind=mcp,service.instance.id=$(POD_NAME)"
           volumeMounts:
             - name: sidecar-identity
               mountPath: /var/run/sidecar-identity
