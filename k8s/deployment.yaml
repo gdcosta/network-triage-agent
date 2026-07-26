@@ -134,8 +134,11 @@ spec:
             # rides in via the kl-triage-secrets envFrom above (add the key there).
             # OPENAI_BASE_URL (http://127.0.0.1:4000/v1) and OPENAI_TARGET_URL
             # (https://api.openai.com) default in code; override only for testing.
+            # gpt-4.1-mini = the Haiku-tier (cheap/fast) equivalent for the agent's
+            # structured detection/triage ($0.40/$1.60 per 1M in/out). gpt-4.1 (full)
+            # is the pricier Sonnet-tier; bump only if triage-card fidelity regresses.
             - name: OPENAI_MODEL
-              value: gpt-4.1
+              value: gpt-4.1-mini
             # Provider + model are toggled LIVE (no pod restart) via kl-triage-config
             # ConfigMap files, resolved fresh each cycle:
             #   /config/llm_provider   anthropic | openai | vllm
