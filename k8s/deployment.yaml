@@ -383,6 +383,18 @@ spec:
             # Per-workload — bot/triage-mcp stay off until they set this too.
             - name: DEFENSECLAW_OTEL_ENABLED
               value: "true"
+            # §5 map-node: also emit DefenseClaw's OWN trace spans (invoke_agent →
+            # apply_guardrail → chat) so the OpenAI path renders a `defenseclaw` node
+            # on the O11y APM map. Traces are gated per-workload — ONLY the agent sets
+            # this; the bot/triage-mcp sidecars keep traces off (their paths emit no
+            # chat spans). DEFENSECLAW_ENVIRONMENT overrides the config template's
+            # baked `environment: linux` so DC's spans land in the kl-triage APM env
+            # (matches the agent's own tracing.py). Node renders only while the agent
+            # runs OpenAI (asymmetry) — see kl-governance docs/apm-defenseclaw-map-node-design.md.
+            - name: DEFENSECLAW_TRACES_ENABLED
+              value: "true"
+            - name: DEFENSECLAW_ENVIRONMENT
+              value: kl-triage
             - name: K8S_NODE_IP
               valueFrom:
                 fieldRef:
