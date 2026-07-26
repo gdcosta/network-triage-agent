@@ -424,8 +424,8 @@ spec:
             - name: LLM_SHIM_PORT
               value: "4100"
             # Phase 2b: the shim emits its own OTel span per request (service.name=
-            # kl-llm-shim, server.address=vllm) so the vLLM governance hop shows on the
-            # O11y map as kl-triage-agent -> kl-llm-shim -> vllm (with the collector's
+            # defenseclaw-llm-shim, server.address=vllm) so the vLLM governance hop shows on the
+            # O11y map as kl-triage-agent -> defenseclaw-llm-shim -> vllm (with the collector's
             # dc_map_edges Edge 3 repointing the agent's vllm edge). Fail-safe + reuses
             # K8S_NODE_IP:4317 + DEFENSECLAW_ENVIRONMENT above. Agent-only. vLLM-path-only
             # (node flips in/out with the provider). NOT `defenseclaw` — it's our shim.
