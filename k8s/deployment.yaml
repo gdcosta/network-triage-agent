@@ -423,6 +423,14 @@ spec:
               value: "true"
             - name: LLM_SHIM_PORT
               value: "4100"
+            # Phase 2b: the shim emits its own OTel span per request (service.name=
+            # kl-llm-shim, server.address=vllm) so the vLLM governance hop shows on the
+            # O11y map as kl-triage-agent -> kl-llm-shim -> vllm (with the collector's
+            # dc_map_edges Edge 3 repointing the agent's vllm edge). Fail-safe + reuses
+            # K8S_NODE_IP:4317 + DEFENSECLAW_ENVIRONMENT above. Agent-only. vLLM-path-only
+            # (node flips in/out with the provider). NOT `defenseclaw` — it's our shim.
+            - name: KL_SHIM_TRACING_ENABLED
+              value: "true"
             # Box /v1 base URL — read LIVE from the kl-triage-config ConfigMap key
             # `vllm_target` (mounted at /config below), so a relaunched box (new
             # IP) is a ConfigMap patch, no restart. Set it with:
