@@ -643,13 +643,17 @@ async def run(mock: bool = False) -> None:
     # first (potentially slow) poll cycle finishes.
     _touch_heartbeat(cfg.heartbeat_file)
 
-    # Task #55: materialize the anthropic SDK's DefenseClaw proxy headers before
-    # the LLM client is built. (The openai/vLLM path is governed by the sidecar
-    # LLM shim, not this SDK proxy — the agent just posts plain to the shim's
-    # loopback, so it needs no gateway token of its own.) Heartbeat is already
-    # fresh above, so the brief wait-for-identity here can't trip the probe.
+    # Read the sidecar gateway token ONCE and share it across both DC-proxy paths:
+    # the anthropic SDK headers (Task #55) and the hosted-openai client's X-DC-Auth
+    # (OpenAI provider). Gated to in-cluster (a DC proxy is configured) so local
+    # dev / --mock never incurs the wait-for-identity. Heartbeat is already fresh
+    # above, so the brief wait here can't trip the probe. (The vLLM path is governed
+    # by the sidecar LLM shim, not this token — it posts plain to the shim loopback.)
+    _gw_token = ""
+    if os.environ.get("ANTHROPIC_BASE_URL") or cfg.openai_api_key:
+        _gw_token = _read_gateway_token()
     if os.environ.get("ANTHROPIC_BASE_URL"):
-        _bootstrap_defenseclaw_proxy_headers(_read_gateway_token())
+        _bootstrap_defenseclaw_proxy_headers(_gw_token)
 
     # Opt-in HTTP state server for the triage_mcp companion service.
     # Disabled by default (port=0) so legacy deployments without the MCP
@@ -680,6 +684,7 @@ async def run(mock: bool = False) -> None:
 
     mock_llm = None
     anthropic_llm = None
+    openai_llm = None
     if use_mock_llm:
         from mock_llm import MockLLMClient
         mock_llm = MockLLMClient()
@@ -687,48 +692,70 @@ async def run(mock: bool = False) -> None:
                     reason="--mock with no ANTHROPIC_API_KEY; scripted responses")
     else:
         # The anthropic client is always built — it's the default brain AND the
-        # instant flip-back target for the live toggle. The openai/vLLM client is
-        # built lazily and rebuilt only when the box URL changes (see _select_llm).
+        # instant flip-back target for the live toggle. The vLLM client is built
+        # lazily and rebuilt only when the box URL changes (see _select_llm).
         anthropic_llm = LLMClient(
             model=cfg.llm_model,
             soul_path=cfg.soul_path,
             provider="anthropic",
             api_key=cfg.anthropic_api_key,
         )
+        # Hosted OpenAI (via the DC proxy) is built eagerly when configured — its
+        # config is static (no live box IP to follow), and building it up front
+        # captures the shared gateway token. Absent config leaves it None and the
+        # live toggle falls back to anthropic.
+        if cfg.openai_api_key and cfg.openai_model:
+            openai_llm = LLMClient(
+                model=cfg.openai_model,
+                soul_path=cfg.soul_path,
+                provider="openai",
+                api_key=cfg.openai_api_key,
+                base_url=cfg.openai_base_url,
+                gw_token=_gw_token,
+                target_url=cfg.openai_target_url,
+            )
 
     # Task #1 live toggle: pick the active client each cycle from the ConfigMap-
-    # backed provider flag + base url (current_provider / current_llm_base_url),
-    # with NO pod restart. The openai client is cached and rebuilt only when its
-    # base url changes, so a relaunched box's new IP is followed live.
-    _openai_cache: dict[str, Any] = {"client": None, "base": None, "model": None}
+    # backed provider flag (current_provider), with NO pod restart. The vLLM client
+    # is cached and rebuilt only when its base url/model changes, so a relaunched
+    # box's new IP is followed live; the hosted-openai + anthropic clients are static.
+    _vllm_cache: dict[str, Any] = {"client": None, "base": None, "model": None}
 
     async def _select_llm() -> tuple[Any, str, str]:
         if use_mock_llm:
             return mock_llm, "mock", cfg.llm_model
-        if current_provider() == "openai":
+        prov = current_provider()
+        if prov == "vllm":
             base = current_llm_base_url()
             model = current_vllm_model()
             if base and model:
-                if (_openai_cache["client"] is None
-                        or _openai_cache["base"] != base
-                        or _openai_cache["model"] != model):
-                    if _openai_cache["client"] is not None:
-                        await _openai_cache["client"].aclose()
-                    _openai_cache["client"] = LLMClient(
+                if (_vllm_cache["client"] is None
+                        or _vllm_cache["base"] != base
+                        or _vllm_cache["model"] != model):
+                    if _vllm_cache["client"] is not None:
+                        await _vllm_cache["client"].aclose()
+                    _vllm_cache["client"] = LLMClient(
                         model=model,
                         soul_path=cfg.soul_path,
-                        provider="openai",
+                        provider="vllm",
                         base_url=base,
                         vllm_api_key=cfg.llm_api_key,
                     )
-                    _openai_cache["base"] = base
-                    _openai_cache["model"] = model
-                return _openai_cache["client"], "openai", model
-            # Requested openai but it isn't fully configured — fall back to
-            # anthropic rather than stall (fail-safe against a bad ConfigMap flip).
+                    _vllm_cache["base"] = base
+                    _vllm_cache["model"] = model
+                return _vllm_cache["client"], "vllm", model
+            # Requested vllm but it isn't fully configured — fall back to anthropic
+            # rather than stall (fail-safe against a bad ConfigMap flip).
+            events.emit(
+                "llm.mode_fallback", requested="vllm",
+                reason="LLM_BASE_URL empty or VLLM_MODEL unset", active="anthropic",
+            )
+        elif prov == "openai":
+            if openai_llm is not None:
+                return openai_llm, "openai", cfg.openai_model
             events.emit(
                 "llm.mode_fallback", requested="openai",
-                reason="LLM_BASE_URL empty or VLLM_MODEL unset", active="anthropic",
+                reason="OPENAI_API_KEY or OPENAI_MODEL unset", active="anthropic",
             )
         return anthropic_llm, "anthropic", cfg.llm_model
 
@@ -771,11 +798,12 @@ async def run(mock: bool = False) -> None:
             # each cycle. Emit llm.mode only on a change (provider/model/url) so a
             # ConfigMap flip is visible in the event stream without per-cycle spam.
             active_llm, active_mode, active_model = await _select_llm()
-            _mode_key = (active_mode, active_model, _openai_cache["base"])
+            _mode_key = (active_mode, active_model, _vllm_cache["base"])
             if _mode_key != _last_mode:
                 events.emit(
                     "llm.mode", mode=active_mode, model=active_model,
-                    base_url=(_openai_cache["base"] if active_mode == "openai"
+                    base_url=(_vllm_cache["base"] if active_mode == "vllm"
+                              else "dc-proxy" if active_mode == "openai"
                               else "anthropic-default"),
                     routed=getattr(active_llm, "_routed", active_mode),
                 )
@@ -808,11 +836,16 @@ async def run(mock: bool = False) -> None:
         except Exception:
             log.exception("error stopping state HTTP server")
 
-    if _openai_cache["client"] is not None:
+    if _vllm_cache["client"] is not None:
         try:
-            await _openai_cache["client"].aclose()
+            await _vllm_cache["client"].aclose()
         except Exception:
-            log.exception("error closing openai LLM client")
+            log.exception("error closing vLLM LLM client")
+    if openai_llm is not None:
+        try:
+            await openai_llm.aclose()
+        except Exception:
+            log.exception("error closing hosted-openai LLM client")
 
     # Flush any buffered spans + GenAI metrics before exit (best-effort; no-ops when off).
     genai.shutdown()

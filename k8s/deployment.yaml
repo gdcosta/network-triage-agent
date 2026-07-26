@@ -125,13 +125,28 @@ spec:
               value: http://127.0.0.1:4100/v1
             # Qwen3 DENSE models (Qwen3-32B) are hybrid-thinking; disable it so the
             # structured detection runs in direct non-thinking mode. Only affects
-            # the openai/vLLM path; non-thinking models ignore the kwarg harmlessly.
+            # the vLLM path; non-thinking models ignore the kwarg harmlessly.
             - name: VLLM_DISABLE_THINKING
               value: "true"
+            # Hosted OpenAI (LLM_PROVIDER=openai). The model to serve; routed through
+            # the SAME DC proxy loopback the anthropic path uses (:4000) via its
+            # /v1/chat/completions handler — governed AND span-emitting. OPENAI_API_KEY
+            # rides in via the kl-triage-secrets envFrom above (add the key there).
+            # OPENAI_BASE_URL (http://127.0.0.1:4000/v1) and OPENAI_TARGET_URL
+            # (https://api.openai.com) default in code; override only for testing.
+            # gpt-5.4-mini ($0.75/$4.50 per 1M in/out, ~Haiku's price band) is the
+            # VALIDATED OpenAI model for the agent. Legacy gpt-4.1-mini ($0.40/$1.60)
+            # was cheaper but FAILED the subtle Meraki-AP device_offline fleet-outlier
+            # (store 112) — a model-capability ceiling, not a prompt gap (same SOUL,
+            # same data; 5.4-mini caught it, 4.1-mini didn't). Validated 2026-07-26.
+            - name: OPENAI_MODEL
+              value: gpt-5.4-mini
             # Provider + model are toggled LIVE (no pod restart) via kl-triage-config
             # ConfigMap files, resolved fresh each cycle:
-            #   /config/llm_provider   anthropic | openai
-            #   /config/vllm_model     Qwen/Qwen3-30B-A3B-Instruct-2507-FP8
+            #   /config/llm_provider   anthropic | openai | vllm
+            #     (2026-07-25 RENAME: "openai" now = hosted OpenAI; the self-hosted
+            #     box is "vllm" — set this file to "vllm" for the box, was "openai".)
+            #   /config/vllm_model     Qwen/Qwen3-30B-A3B-Instruct-2507-FP8  (vllm only)
             # The BOX url lives in the ConfigMap key `vllm_target` and is read by the
             # SHIM (sidecar), not the agent — so a relaunched box (new IP) is a
             # ConfigMap patch with no restart. Absent files → env defaults

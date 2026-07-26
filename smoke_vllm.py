@@ -34,7 +34,7 @@ async def main() -> None:
     if not base:
         raise SystemExit("set LLM_BASE_URL (e.g. http://localhost:8000/v1)")
 
-    c = LLMClient(model=model, soul_path=soul, provider="openai",
+    c = LLMClient(model=model, soul_path=soul, provider="vllm",
                   base_url=base, vllm_api_key=os.environ.get("LLM_API_KEY", "EMPTY"))
 
     t0 = time.monotonic()

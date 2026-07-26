@@ -231,23 +231,32 @@ class TriageReports:
 # ---------- client ----------
 
 class LLMClient:
-    """LLM wrapper supporting two providers, chosen at construction:
+    """LLM wrapper supporting three providers, chosen at construction:
 
       provider="anthropic" — Anthropic SDK, forced tool_use for structured output.
                              In k8s the SDK's base_url is the DefenseClaw proxy
                              (ANTHROPIC_BASE_URL), so governance is unchanged.
-      provider="openai"    — any OpenAI-compatible /v1 endpoint. Same schemas,
-                             enforced via response_format=json_schema (guided
-                             decoding) instead of tool_use, so no server-side
-                             tool-calling flag is needed. There is no Anthropic
-                             key on this path.
+      provider="vllm"      — the self-hosted OpenAI-compatible box, via the sidecar
+                             LLM shim (task #1) or a direct box (harness). Structured
+                             output via response_format=json_schema (guided decoding);
+                             COMPACT prompts + 1-store-per-call triage chunking for the
+                             bounded context window. Sends no upstream key of its own
+                             weight (the shim injects the real one).
+      provider="openai"    — REAL hosted OpenAI (api.openai.com) routed through the
+                             DC guardrail proxy's /v1/chat/completions handler. Auth =
+                             Authorization: Bearer <openai key> (passed upstream) +
+                             X-DC-Auth: Bearer <gateway token> + X-DC-Target-URL. This
+                             is the one path that makes DefenseClaw emit its governance
+                             trace hierarchy (unlike the anthropic passthrough / vllm
+                             shim). Structured output via response_format=json_object
+                             (our schema uses additionalProperties maps, outside
+                             OpenAI's strict json_schema subset) with the schema folded
+                             into the instruction; FULL prompts like the anthropic path
+                             (GPT models have the window). If per-field fidelity proves
+                             insufficient, switch to OpenAI tool/function-calling.
 
-    On the openai path, base_url points at whatever OpenAI-compatible endpoint the
-    caller wants: the DIRECT vLLM box (local dev / the #73 A/B harness), or — in
-    k8s — the loopback LLM guardrail shim in the DefenseClaw sidecar (task #1),
-    which inspects the prompt and forwards to the box holding the vLLM token. This
-    client is dialect-only; it doesn't know or care which, so it sends no token of
-    its own weight (the shim injects the real one). See kl-governance/llm_shim.py.
+    The "vllm" and "openai" providers share the OpenAI wire dialect (_call_openai);
+    they differ only in routing/auth, prompt sizing, and response_format flavor.
     """
 
     def __init__(
@@ -259,28 +268,49 @@ class LLMClient:
         api_key: str = "",
         base_url: str = "",
         vllm_api_key: str = "EMPTY",
+        gw_token: str = "",
+        target_url: str = "",
         temperature: float | None = None,
     ):
         self._provider = provider
         self._model = model
+        # OpenAI wire dialect covers both the self-hosted box and hosted OpenAI.
+        self._wire = "openai" if provider in ("openai", "vllm") else "anthropic"
+        # COMPACT prompts + triage chunking only for the context-bounded vLLM box;
+        # hosted OpenAI and Anthropic get the full-window path.
+        self._compact = provider == "vllm"
+        # Hosted OpenAI (real api.openai.com through the DC proxy) vs the vLLM box.
+        self._hosted = provider == "openai"
         # temperature: None = leave unset (Claude default) on the anthropic path;
         # the openai/vLLM path defaults to 0. The A/B harness passes 0 to BOTH so
         # the comparison is deterministic. Production leaves this None (unchanged).
         self._temperature = temperature
         self._soul = Path(soul_path).read_text(encoding="utf-8")
-        if provider == "openai":
+        if self._wire == "openai":
             # Full endpoint (avoid httpx base_url path-join surprises with the
-            # leading-slash /chat/completions). base_url includes /v1. In k8s this
-            # is the sidecar shim's loopback; the harness points it at the box.
+            # leading-slash /chat/completions). base_url includes /v1.
             self._endpoint = base_url.rstrip("/") + "/chat/completions"
-            # Bearer is passed for the direct-to-box harness path; when base_url is
-            # the sidecar shim, the shim ignores it and injects the real vLLM key.
+            if self._hosted:
+                # Hosted OpenAI via the DC proxy. Authorization carries the OpenAI
+                # key (the proxy's ExtractAPIKey reads it and forwards upstream);
+                # X-DC-Auth is the gateway token; X-DC-Target-URL is api.openai.com.
+                headers = {"Authorization": f"Bearer {api_key}"}
+                if gw_token:
+                    headers["X-DC-Auth"] = f"Bearer {gw_token}"
+                if target_url:
+                    headers["X-DC-Target-URL"] = target_url
+                self._routed = "openai-dc-proxy"
+            else:
+                # vLLM box. Bearer is for the direct-to-box harness path; when
+                # base_url is the sidecar shim, the shim ignores it and injects the
+                # real vLLM key.
+                headers = {"Authorization": f"Bearer {vllm_api_key}"}
+                self._routed = "vllm-shim"
             self._http = httpx.AsyncClient(
-                headers={"Authorization": f"Bearer {vllm_api_key}"},
-                timeout=httpx.Timeout(120.0),  # vLLM triage passes run ~5-10s
+                headers=headers,
+                timeout=httpx.Timeout(120.0),  # triage passes run ~5-10s
             )
             self._client = None
-            self._routed = "openai"
         else:
             self._client = AsyncAnthropic(api_key=api_key)
             self._http = None
@@ -301,7 +331,7 @@ class LLMClient:
         recurrence: dict[str, Any] | None = None,
     ) -> DetectionDecision:
         user_msg = _detection_prompt(
-            scan_data, previous_alerts, recurrence, compact=self._provider == "openai"
+            scan_data, previous_alerts, recurrence, compact=self._compact
         )
         with genai.llm_call(
             model=self._model, provider=self._provider, phase="detection"
@@ -349,7 +379,7 @@ class LLMClient:
         # (Anthropic/Haiku, 200K) keeps the single all-at-once call with full
         # cross-store visibility — it has the window and doesn't get confused by the
         # fan-out. Detection still correlates across all stores upstream either way.
-        if self._provider == "openai" and len(drill_data) > 1:
+        if self._compact and len(drill_data) > 1:
             merged: list[dict[str, Any]] = []
             for store, drills in drill_data.items():
                 part = await self._triage_call(
@@ -368,7 +398,7 @@ class LLMClient:
     ) -> TriageReports:
         user_msg = _triage_prompt(
             scan_data, drill_data, previous_alerts, recurrence,
-            compact=self._provider == "openai",
+            compact=self._compact,
         )
         with genai.llm_call(
             model=self._model, provider=self._provider, phase="triage"
@@ -395,7 +425,7 @@ class LLMClient:
         )
 
     async def _call(self, user_text: str, tool: dict[str, Any]) -> dict[str, Any]:
-        if self._provider == "openai":
+        if self._wire == "openai":
             return await self._call_openai(user_text, tool)
         return await self._call_anthropic(user_text, tool)
 
@@ -437,15 +467,20 @@ class LLMClient:
         }
 
     async def _call_openai(self, user_text: str, tool: dict[str, Any]) -> dict[str, Any]:
-        # OpenAI-compatible (vLLM) path. No tool_use — the same tool input_schema
-        # is enforced via response_format=json_schema (vLLM guided decoding). The
-        # tool description + schema are folded into the user turn so the model gets
-        # the same semantic guidance the Anthropic tool definition carried; the
-        # grammar guarantees the shape. SOUL.md rides as the system message and is
-        # auto-cached by vLLM's prefix cache (no cache_control needed). _require_all
-        # tightens the schema so guided decoding emits the FULL card structure
-        # (Qwen3 otherwise narrates optional fields into `reasoning` — see docstring).
-        schema = _require_all(tool["input_schema"])
+        # Shared OpenAI-wire path for BOTH the self-hosted vLLM box and hosted
+        # OpenAI. No tool_use — the tool description + schema are folded into the
+        # user turn so the model gets the same semantic guidance the Anthropic tool
+        # definition carried, and structured output is enforced via response_format.
+        #  - vLLM: response_format=json_schema (guided decoding GUARANTEES the shape)
+        #    over the _require_all-tightened schema (Qwen3 otherwise narrates optional
+        #    fields into `reasoning` — see _require_all docstring).
+        #  - hosted OpenAI: response_format=json_object (our schema uses
+        #    additionalProperties maps, outside OpenAI's strict json_schema subset),
+        #    with the ORIGINAL schema in the instruction — the same guidance the
+        #    Anthropic tool_use path uses, so triage behavior stays comparable.
+        # SOUL.md rides as the system message (vLLM prefix-caches it; OpenAI has no
+        # explicit cache_control on this path).
+        schema = tool["input_schema"] if self._hosted else _require_all(tool["input_schema"])
         instruction = (
             f"{tool['description']}\n\n"
             "Return a single JSON object that conforms to this schema (the field "
@@ -453,42 +488,45 @@ class LLMClient:
             "markdown fences:\n"
             f"{json.dumps(schema, indent=2)}"
         )
-        payload = {
+        payload: dict[str, Any] = {
             "model": self._model,
-            # A self-hosted model has a bounded context window (vLLM --max-model-len,
-            # e.g. 16384 on the L4). prompt_tokens + max_tokens must fit inside it or
-            # vLLM returns 400 "maximum context length". Triage/detection output is
-            # <1K tokens, so 4096 is generous and leaves ample room for the ~8K SOUL+
-            # data prompt. Tune with LLM_MAX_TOKENS if you raise --max-model-len.
-            "max_tokens": int(os.environ.get("LLM_MAX_TOKENS", "4096")),
+            # vLLM is context-bounded (--max-model-len): prompt+output must fit or it
+            # 400s, so 4096 (tunable via LLM_MAX_TOKENS) leaves room for the ~8K
+            # prompt. Hosted OpenAI has a large window, so match the anthropic path's
+            # generous 8192 completion budget.
+            "max_tokens": 8192 if self._hosted else int(os.environ.get("LLM_MAX_TOKENS", "4096")),
             # Deterministic triage: reproducible severity/dedup verdicts across
-            # cycles and a fair A/B vs Haiku. (Model default is temp 0.7.)
+            # cycles and a fair A/B. (Model default is temp 0.7.)
             "temperature": self._temperature if self._temperature is not None else 0,
             "messages": [
                 {"role": "system", "content": self._soul},
                 {"role": "user", "content": f"{user_text}\n\n{instruction}"},
             ],
-            "response_format": {
+        }
+        if self._hosted:
+            # json_object = valid-JSON guarantee without the strict-schema subset.
+            payload["response_format"] = {"type": "json_object"}
+        else:
+            payload["response_format"] = {
                 "type": "json_schema",
                 "json_schema": {"name": tool["name"], "schema": schema},
-            },
-        }
-        # Qwen3 DENSE models (e.g. Qwen3-32B) are HYBRID thinking models — they
-        # default to emitting a <think> block before the answer. Our structured
-        # detection wants direct non-thinking output, so pass the chat-template
-        # switch through vLLM when VLLM_DISABLE_THINKING is set. Guided decoding
-        # already forces valid JSON, but running a thinking model with thinking
-        # merely suppressed-by-grammar (rather than properly disabled) muddies the
-        # quality read. Harmless on templates that don't use the kwarg (e.g. the
-        # -Instruct-2507 non-thinking MoE); gated so it only touches the vLLM path.
-        if os.environ.get("VLLM_DISABLE_THINKING", "").strip().lower() in ("1", "true", "yes"):
-            payload["chat_template_kwargs"] = {"enable_thinking": False}
+            }
+            # Qwen3 DENSE models (e.g. Qwen3-32B) are HYBRID thinking models — they
+            # default to emitting a <think> block before the answer. Our structured
+            # detection wants direct non-thinking output, so pass the chat-template
+            # switch through vLLM when VLLM_DISABLE_THINKING is set. Guided decoding
+            # already forces valid JSON, but running a thinking model with thinking
+            # merely suppressed-by-grammar muddies the quality read. Harmless on
+            # templates that don't use the kwarg (e.g. the -Instruct-2507 MoE).
+            if os.environ.get("VLLM_DISABLE_THINKING", "").strip().lower() in ("1", "true", "yes"):
+                payload["chat_template_kwargs"] = {"enable_thinking": False}
         resp = await self._http.post(self._endpoint, json=payload)
         if resp.status_code >= 400:
-            # Surface vLLM's actual reason (context-length, schema, etc.) instead of
-            # a bare status — raise_for_status() hides the body that explains the 400.
+            # Surface the endpoint's actual reason (context-length, schema, DC-proxy
+            # auth/guardrail block, etc.) instead of a bare status — raise_for_status
+            # hides the body that explains it.
             raise RuntimeError(
-                f"vLLM {resp.status_code} from {self._endpoint}: {resp.text[:1000]}"
+                f"{self._routed} {resp.status_code} from {self._endpoint}: {resp.text[:1000]}"
             )
         data = resp.json()
         choice = data["choices"][0]
@@ -496,21 +534,25 @@ class LLMClient:
         try:
             tool_input = json.loads(content)
         except json.JSONDecodeError as e:
-            # Guided decoding should make this impossible; if it fires, the
-            # endpoint isn't enforcing the schema — surface a short snippet.
+            # Guided decoding / json_object should make this impossible; if it fires,
+            # the endpoint isn't enforcing structure — surface a short snippet.
             raise RuntimeError(
-                f"vLLM returned non-JSON content ({e}): {content[:500]!r}"
+                f"{self._routed} returned non-JSON content ({e}): {content[:500]!r}"
             ) from e
         usage = data.get("usage", {}) or {}
+        # Hosted OpenAI reports prompt-cache hits under prompt_tokens_details; vLLM
+        # doesn't surface prefix-cache hits in OpenAI usage (zeros are fine — the
+        # self-hosted path has no cache billing).
+        cache_read = 0
+        if self._hosted:
+            cache_read = (usage.get("prompt_tokens_details") or {}).get("cached_tokens", 0) or 0
         return {
             "tool_input": tool_input if isinstance(tool_input, dict) else {},
             "stop_reason": choice.get("finish_reason"),
             "usage": {
                 "input_tokens": usage.get("prompt_tokens", 0),
                 "output_tokens": usage.get("completion_tokens", 0),
-                # vLLM prefix-cache hits aren't reported in OpenAI usage; the
-                # dashboard tolerates zeros (self-hosted has no cache billing).
-                "cache_read_input_tokens": 0,
+                "cache_read_input_tokens": cache_read,
                 "cache_creation_input_tokens": 0,
             },
         }

@@ -60,6 +60,16 @@ spec:
         - ports:
             - port: "443"
               protocol: TCP
+    # OpenAI (LLM_PROVIDER=openai) — the DefenseClaw sidecar forwards the agent's
+    # /v1/chat/completions calls here after inspecting them; the agent container
+    # only talks to the sidecar proxy over loopback :4000. Needed for the hosted-
+    # OpenAI provider; harmless when the agent runs anthropic/vllm.
+    - toFQDNs:
+        - matchName: api.openai.com
+      toPorts:
+        - ports:
+            - port: "443"
+              protocol: TCP
     # Teams card posting — agent → Power Automate incoming webhook.
     # Exact host + same-domain wildcard so a webhook rotation in the same
     # Power Platform environment doesn't require a policy edit.
