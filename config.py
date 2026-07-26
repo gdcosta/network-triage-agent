@@ -58,7 +58,12 @@ def _read_text(path: str) -> str | None:
 # volume mount with NO pod restart — the poll loop picks the new values next cycle.
 _PROVIDER_FILE = os.environ.get("LLM_PROVIDER_FILE", "/config/llm_provider")
 _VLLM_MODEL_FILE = os.environ.get("VLLM_MODEL_FILE", "/config/vllm_model")
-_VALID_PROVIDERS = ("anthropic", "openai")
+# Three backends. NOTE the 2026-07-25 rename: "openai" now means REAL hosted
+# OpenAI (api.openai.com via the DC proxy); the self-hosted vLLM path — which
+# used to be called "openai" — is now "vllm". Coordinate the live ConfigMap
+# value `/config/llm_provider` "openai"->"vllm" at deploy or the running soak
+# would be repurposed. See kl-governance/docs/openai-provider-option-design.md.
+_VALID_PROVIDERS = ("anthropic", "openai", "vllm")
 
 
 def current_provider() -> str:
@@ -70,8 +75,10 @@ def current_provider() -> str:
       2. `LLM_PROVIDER` env — bootstrap/default; changing it needs a pod roll.
       3. "anthropic".
 
-    Unknown/garbage values (typo'd file, blank) fall through to the next source,
-    so a bad control file never strands the agent on an invalid provider.
+    Valid values: "anthropic" (DC passthrough), "openai" (hosted OpenAI via the
+    DC proxy's /v1/chat/completions), "vllm" (self-hosted shim). Unknown/garbage
+    values (typo'd file, blank) fall through to the next source, so a bad control
+    file never strands the agent on an invalid provider.
     """
     for raw in (_read_text(_PROVIDER_FILE), os.environ.get("LLM_PROVIDER")):
         if raw is None:
@@ -111,20 +118,32 @@ class Config:
     llm_model: str
     soul_path: str
 
-    # LLM provider selection (#36 / #73 cost+quality A/B).
+    # LLM provider selection (#36 / #73 cost+quality A/B; OpenAI added 2026-07-25).
     #   "anthropic" (default) — Anthropic SDK; in k8s this still flows through the
     #     DefenseClaw guardrail proxy via ANTHROPIC_BASE_URL (unchanged).
-    #   "openai" — any OpenAI-compatible /v1 endpoint (e.g. the self-hosted vLLM
-    #     box). Uses llm_base_url + llm_api_key; structured output via json_schema
-    #     response_format instead of Anthropic tool_use. Nothing changes unless
-    #     LLM_PROVIDER is explicitly set to "openai".
+    #   "vllm" — the self-hosted OpenAI-compatible box, via the sidecar LLM shim
+    #     (llm_base_url + llm_api_key + vllm_model); structured output via
+    #     json_schema guided decoding. (This is the path formerly named "openai".)
+    #   "openai" — REAL hosted OpenAI (api.openai.com) routed through the DC
+    #     guardrail proxy's /v1/chat/completions handler (openai_* below) so
+    #     governance applies AND DefenseClaw emits its trace hierarchy.
     llm_provider: str
     llm_base_url: str
     llm_api_key: str
-    # openai/vLLM model id (env VLLM_MODEL). Separate from llm_model (the anthropic
-    # model) so BOTH clients can be built at once for the live toggle — each carries
-    # its own model. Blank disables the openai backend even if a base url is set.
+    # vLLM model id (env VLLM_MODEL). Separate from llm_model (the anthropic model)
+    # so BOTH clients can be built at once for the live toggle — each carries its
+    # own model. Blank disables the vllm backend even if a base url is set.
     vllm_model: str
+
+    # Hosted OpenAI (provider="openai"). Routed through the DC proxy on
+    # /v1/chat/completions: Authorization carries the OpenAI key (passed upstream),
+    # X-DC-Auth carries the sidecar gateway token (read at runtime, not here), and
+    # X-DC-Target-URL points the proxy at openai_target_url. Blank api_key/model
+    # disables the backend (the live toggle then falls back to anthropic).
+    openai_api_key: str
+    openai_model: str
+    openai_base_url: str
+    openai_target_url: str
 
     # Splunk MCP (data plane)
     splunk_mcp_command: str
@@ -221,11 +240,21 @@ def load_config(mock: bool = False) -> Config:
     # (our box runs without --api-key, protected at the network layer).
     llm_api_key = os.environ.get("LLM_API_KEY", "EMPTY").strip() or "EMPTY"
 
+    # Hosted OpenAI. base_url defaults to the DC proxy's OpenAI endpoint (same
+    # sidecar/loopback as the anthropic proxy, /v1 base); target_url is where the
+    # proxy forwards upstream. Both overridable for local dev / direct testing.
+    openai_api_key = os.environ.get("OPENAI_API_KEY", "").strip()
+    openai_model = os.environ.get("OPENAI_MODEL", "").strip()
+    openai_base_url = os.environ.get("OPENAI_BASE_URL", "http://127.0.0.1:4000/v1").strip()
+    openai_target_url = os.environ.get("OPENAI_TARGET_URL", "https://api.openai.com").strip()
+
     api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
     if provider == "anthropic" and not api_key and not mock:
         raise RuntimeError("ANTHROPIC_API_KEY is required (or pass --mock)")
-    if provider == "openai" and not llm_base_url and not mock:
-        raise RuntimeError("LLM_BASE_URL is required when LLM_PROVIDER=openai")
+    if provider == "vllm" and not llm_base_url and not mock:
+        raise RuntimeError("LLM_BASE_URL is required when LLM_PROVIDER=vllm")
+    if provider == "openai" and not openai_api_key and not mock:
+        raise RuntimeError("OPENAI_API_KEY is required when LLM_PROVIDER=openai")
 
     webhook = os.environ.get("TEAMS_WEBHOOK_URL", "").strip()
     if not webhook and not mock:
@@ -243,6 +272,10 @@ def load_config(mock: bool = False) -> Config:
         llm_base_url=llm_base_url,
         llm_api_key=llm_api_key,
         vllm_model=os.environ.get("VLLM_MODEL", "").strip(),
+        openai_api_key=openai_api_key,
+        openai_model=openai_model,
+        openai_base_url=openai_base_url,
+        openai_target_url=openai_target_url,
         splunk_mcp_command=cmd or "mock",
         splunk_mcp_args=shlex.split(os.environ.get("SPLUNK_MCP_ARGS", "")),
         splunk_mcp_env=_parse_env_pairs(os.environ.get("SPLUNK_MCP_ENV", "")),

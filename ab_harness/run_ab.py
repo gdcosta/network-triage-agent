@@ -90,7 +90,7 @@ async def main():
                             soul_path=soul, provider="anthropic",
                             api_key=os.environ.get("ANTHROPIC_API_KEY", ""), temperature=0)),
         ("qwen", LLMClient(model=os.environ.get("VLLM_MODEL", "stelterlab/Qwen3-30B-A3B-Instruct-2507-AWQ"),
-                           soul_path=soul, provider="openai", base_url=os.environ["LLM_BASE_URL"],
+                           soul_path=soul, provider="vllm", base_url=os.environ["LLM_BASE_URL"],
                            vllm_api_key=os.environ.get("LLM_API_KEY", "EMPTY"), temperature=0)),
     ]
     score = {label: _new_score() for label, _ in models}

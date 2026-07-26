@@ -35,8 +35,20 @@ _log = logging.getLogger(__name__)
 
 
 def _provider_labels(provider: str) -> str:
-    """gen_ai provider/system value. vLLM speaks the OpenAI dialect."""
-    return "openai" if provider == "openai" else "anthropic"
+    """gen_ai provider/system value. Both hosted OpenAI and the self-hosted vLLM
+    box speak the OpenAI dialect."""
+    return "openai" if provider in ("openai", "vllm") else "anthropic"
+
+
+def _node(provider: str) -> str:
+    """Service-map node (server.address / peer.service). Distinct per backend so
+    O11y draws openai / vllm / anthropic as separate downstream nodes — even though
+    openai and vllm share the gen_ai system label above."""
+    if provider == "vllm":
+        return "vllm"
+    if provider == "openai":
+        return "openai"
+    return "anthropic"
 
 
 def init_genai() -> bool:
@@ -167,7 +179,7 @@ def llm_call(model: str, provider: str, phase: str) -> Iterator[_LLMHandle]:
             # effect; that node vanished when Phase 1b switched to the GenAI span.) AI
             # Agent Monitoring is unaffected — it keys on gen_ai.provider.name. `phase` is
             # not put on the span (the emitter drops it) — it's only the fallback span name.
-            inv.server_address = "vllm" if system == "openai" else "anthropic"
+            inv.server_address = _node(provider)
         except Exception as exc:  # noqa: BLE001
             _log.warning("llm_call build failed (%s); falling back to span", exc)
             inv = None
@@ -185,7 +197,7 @@ def llm_call(model: str, provider: str, phase: str) -> Iterator[_LLMHandle]:
     with tracing.span(
         "llm." + phase, kind="CLIENT",
         **{"gen_ai.operation.name": "chat", "gen_ai.system": system,
-           "gen_ai.request.model": model, "peer.service": "vllm" if system == "openai" else "anthropic",
+           "gen_ai.request.model": model, "peer.service": _node(provider),
            "kl.phase": phase},
     ) as sp:
         yield _LLMHandle(span=sp)
