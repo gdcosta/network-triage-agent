@@ -167,6 +167,12 @@ class Config:
     # detection prompt stays current. Recurrence over days changes slowly, so this
     # is minutes, not per-cycle.
     history_refresh_seconds: int
+    # Hard timeout (seconds) on each history call_tool — the mcp-remote SSE hop to
+    # triage-mcp. A broken SSE session returns NO error, just an indefinite await,
+    # and since rehydrate runs before/inside the poll loop that wedges the whole
+    # agent (the 2026-07-26 startup-hang). Bounded so a wedge fails-open. The inspect
+    # hop already has its own timeout (mcp_inspect.INSPECT_TIMEOUT_S).
+    history_call_timeout_s: int
 
     # Teams (notification plane)
     teams_webhook_url: str
@@ -289,6 +295,7 @@ def load_config(mock: bool = False) -> Config:
         history_mcp_tool=os.environ.get("HISTORY_MCP_TOOL", "get_alert_history"),
         history_lookback_hours=int(os.environ.get("HISTORY_LOOKBACK_HOURS", "24")),
         history_refresh_seconds=int(os.environ.get("HISTORY_REFRESH_SECONDS", "600")),
+        history_call_timeout_s=int(os.environ.get("HISTORY_CALL_TIMEOUT_SECONDS", "30")),
         teams_webhook_url=webhook or "mock://stdout",
         poll_interval_seconds=int(os.environ.get("POLL_INTERVAL_SECONDS", "30")),
         earliest_time=os.environ.get("EARLIEST_TIME", "-5m"),

@@ -213,6 +213,11 @@ spec:
             # Re-fetch history this often so the recurrence summary stays current.
             - name: HISTORY_REFRESH_SECONDS
               value: "600"
+            # Hard timeout on the history call_tool (mcp-remote SSE hop to triage-mcp).
+            # A wedged SSE session (e.g. triage-mcp rolled) otherwise hangs startup
+            # indefinitely (2026-07-26 incident); this bounds it → fail-open.
+            - name: HISTORY_CALL_TIMEOUT_SECONDS
+              value: "30"
             # Task #69a: durable token-usage capture. The agent drops one JSON
             # file per usage event into this shared spool; the sidecar drains it
             # to linda HEC. The agent holds NO HEC/Splunk credential — the
@@ -315,12 +320,22 @@ spec:
           # No HTTP server on this workload — liveness is the freshness of the
           # heartbeat file the poll loop touches each cycle. If poll_once hangs,
           # the file goes stale and the pod is restarted.
+          # Threshold 300s (was 150s): the heartbeat is only refreshed once per
+          # cycle, and on the slow self-hosted vLLM box a busy cycle (detection +
+          # per-fault correlation + triage passes, all serialized on one GPU) can
+          # take 130s+ with several concurrent faults — brushing the old 150s limit
+          # and triggering spurious SIGKILLs (exitCode 137) mid-work. 300s gives
+          # headroom for multi-fault cycles on vLLM. Trade-off: a genuinely hung
+          # poll_once now takes up to 300s + 3×30s ≈ 6.5min to be caught (fine for a
+          # 30s poll agent). On a fast provider (Haiku) cycles are seconds, so this
+          # is pure safety margin. Better long-term fix = touch the heartbeat at each
+          # sub-step (mid-cycle) so the threshold can stay tight; that's a code change.
           livenessProbe:
             exec:
               command:
                 - sh
                 - -c
-                - 'test $(( $(date +%s) - $(stat -c %Y /tmp/agent-heartbeat 2>/dev/null || echo 0) )) -lt 150'
+                - 'test $(( $(date +%s) - $(stat -c %Y /tmp/agent-heartbeat 2>/dev/null || echo 0) )) -lt 300'
             initialDelaySeconds: 20
             periodSeconds: 30
             timeoutSeconds: 5

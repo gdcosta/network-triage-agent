@@ -87,7 +87,14 @@ class SplunkClient:
         tool_name: str,
         row_limit: int,
         env: dict[str, str] | None = None,
+        peer_service: str = "splunk-bob",
     ):
+        # peer_service is the APM service-map label for this client's `splunk.query`
+        # CLIENT span (which downstream backend it connects to). Defaults to
+        # "splunk-bob" (the agent's production retail telemetry) so existing callers
+        # are unchanged; triage-mcp overrides it to "splunk-linda" because it reads
+        # the cluster-observability index, NOT bob. Deriving it from the actual target
+        # keeps the map honest without a downstream collector relabel.
         # Inherit parent process env then layer SPLUNK_MCP_ENV on top, so
         # things like NODE_TLS_REJECT_UNAUTHORIZED=0 reach the bridge
         # subprocess without polluting the agent's own env.
@@ -97,6 +104,7 @@ class SplunkClient:
         self._params = StdioServerParameters(command=command, args=args, env=full_env)
         self._tool_name = tool_name
         self._row_limit = row_limit
+        self._peer_service = peer_service
         self._stack: AsyncExitStack | None = None
         self._session: ClientSession | None = None
 
@@ -135,7 +143,7 @@ class SplunkClient:
         # per-store drill), so the drill "storm" shows as parallel children in APM.
         with tracing.span(
             "splunk.query", kind="CLIENT",
-            **{"peer.service": "splunk-bob", "kl.tool": self._tool_name,
+            **{"peer.service": self._peer_service, "kl.tool": self._tool_name,
                "kl.row_limit": self._row_limit, "kl.spl_prefix": spl[:80]},
         ) as _sp:
             result = await self._session.call_tool(
@@ -173,9 +181,19 @@ class SplunkClient:
         """
         if self._session is None:
             raise RuntimeError("SplunkClient not opened — use 'async with'")
-        result = await self._session.call_tool(self._tool_name, arguments=arguments)
-        if getattr(result, "isError", False):
-            raise RuntimeError(f"mcp tool error ({self._tool_name}): {result}")
+        # CLIENT span → draws this MCP tool call as a service-map edge to its peer
+        # (e.g. agent -> triage-mcp for get_alert_history). Mirrors run_query's span;
+        # peer.service is this client's configured backend. NOTE: the trace does NOT
+        # stitch across the `npx mcp-remote` subprocess (no W3C traceparent), so the
+        # peer's SERVER span stays a separate root — the edge is drawn, the waterfall
+        # is not (deferred: traceparent propagation). No-op when tracing is disabled.
+        with tracing.span(
+            "mcp." + self._tool_name, kind="CLIENT",
+            **{"peer.service": self._peer_service, "kl.tool": self._tool_name},
+        ):
+            result = await self._session.call_tool(self._tool_name, arguments=arguments)
+            if getattr(result, "isError", False):
+                raise RuntimeError(f"mcp tool error ({self._tool_name}): {result}")
         return _extract_payload(result)
 
 

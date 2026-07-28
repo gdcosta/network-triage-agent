@@ -158,7 +158,14 @@ async def _rehydrate_history(
         return
 
     try:
-        payload = await history.call_tool(args)
+        # asyncio.wait_for bounds the mcp-remote SSE hop: a broken session returns
+        # no error, only an indefinite await, which would wedge the poll loop
+        # (the 2026-07-26 startup-hang — a co-rolled triage-mcp dropped the session).
+        # On timeout this raises TimeoutError → caught below → fail-open (history is
+        # enrichment, never a gate; a failed rehydrate just keeps the prior snapshot).
+        payload = await asyncio.wait_for(
+            history.call_tool(args), timeout=cfg.history_call_timeout_s
+        )
     except Exception as exc:
         events.emit("history.rehydrate_failed",
                     error=type(exc).__name__, message=str(exc)[:200])
@@ -777,6 +784,10 @@ async def run(mock: bool = False) -> None:
                         cfg.history_mcp_command, cfg.history_mcp_args,
                         cfg.history_mcp_tool, cfg.splunk_row_limit,
                         env=cfg.history_mcp_env,
+                        # This client talks to triage-mcp:8081 (NOT bob) — label the
+                        # call_tool CLIENT span so it draws an honest agent -> triage-mcp
+                        # map edge instead of inheriting the "splunk-bob" default.
+                        peer_service="triage-mcp",
                     )
                     history = await stack.enter_async_context(history_cm)
                     await _rehydrate_history(history, cfg, state)
