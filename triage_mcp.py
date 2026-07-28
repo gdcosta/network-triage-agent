@@ -554,7 +554,7 @@ async def get_recent_cycle() -> dict[str, Any]:
 @mcp.tool()
 @_traced
 async def get_alert_history(
-    store_id: str | None = None, hours: int = 24, limit: int = 500
+    store_id: str = "", hours: int = 24, limit: int = 500
 ) -> dict[str, Any]:
     """Authoritative history of a store's PAST ALERTS, as recorded by the triage agent.
 
@@ -658,7 +658,7 @@ async def get_alert_history(
 @mcp.tool()
 @_traced
 async def get_alert_summary(
-    store_id: str | None = None, hours: int = 168
+    store_id: str = "", hours: int = 168
 ) -> dict[str, Any]:
     """Fleet-wide alert SUMMARY — one deduplicated row per store, aggregated
     server-side so it is NEVER truncated by the row cap.
