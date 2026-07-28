@@ -135,7 +135,7 @@ async def _mock_poster(_url: str, card: dict) -> None:
 
 
 async def _rehydrate_history(
-    history, cfg: Config, state: AlertState, kind: str = "startup"
+    cfg: Config, state: AlertState, kind: str = "startup"
 ) -> None:
     """Task #56: read the agent's OWN past triage.report outcomes back from
     triage-mcp and stash them on state.startup_history.
@@ -146,6 +146,15 @@ async def _rehydrate_history(
     does NOT mutate the open-alert set. Fail-open at every step: history is
     enrichment, never a gate, so a triage-mcp/inspect hiccup must not stop the
     loop (a failed refresh just keeps the previous snapshot).
+
+    Opens a FRESH triage-mcp session per call (open → call → close) rather than
+    reusing one. A long-lived MCP-over-SSE session gets WEDGED when triage-mcp
+    restarts: mcp-remote reconnects but does not re-initialize, so the server then
+    rejects every tools/call with "Invalid request parameters" and the agent —
+    failing open — stays silently blind for days (root cause of the recurring
+    get_alert_history errors, confirmed 2026-07-28). A fresh session sidesteps the
+    wedge; rehydrate is infrequent (startup + every history_refresh_seconds) and
+    fail-open, so the per-call mcp-remote spawn is cheap.
     """
     args: dict[str, Any] = {"hours": cfg.history_lookback_hours}
 
@@ -158,14 +167,19 @@ async def _rehydrate_history(
         return
 
     try:
-        # asyncio.wait_for bounds the mcp-remote SSE hop: a broken session returns
-        # no error, only an indefinite await, which would wedge the poll loop
-        # (the 2026-07-26 startup-hang — a co-rolled triage-mcp dropped the session).
-        # On timeout this raises TimeoutError → caught below → fail-open (history is
-        # enrichment, never a gate; a failed rehydrate just keeps the prior snapshot).
-        payload = await asyncio.wait_for(
-            history.call_tool(args), timeout=cfg.history_call_timeout_s
-        )
+        # FRESH session (see docstring) — never hold a triage-mcp session open across
+        # calls, or a triage-mcp restart wedges it permanently. asyncio.wait_for bounds
+        # the mcp-remote SSE hop: a broken session returns no error, only an indefinite
+        # await, which would wedge the poll loop (also the 2026-07-26 startup-hang). On
+        # timeout this raises TimeoutError → caught below → fail-open.
+        async with SplunkClient(
+            cfg.history_mcp_command, cfg.history_mcp_args,
+            cfg.history_mcp_tool, cfg.splunk_row_limit,
+            env=cfg.history_mcp_env, peer_service="triage-mcp",
+        ) as history:
+            payload = await asyncio.wait_for(
+                history.call_tool(args), timeout=cfg.history_call_timeout_s
+            )
     except Exception as exc:
         events.emit("history.rehydrate_failed",
                     error=type(exc).__name__, message=str(exc)[:200])
@@ -768,42 +782,30 @@ async def run(mock: bool = False) -> None:
 
     async with AsyncExitStack() as stack:
         splunk = await stack.enter_async_context(splunk_cm)
-        history = None  # set below if history is enabled; used for periodic refresh
-
-        # Task #56 stage 1: optional second MCP client → triage-mcp's
-        # get_alert_history, so the agent can read its OWN past outcomes (and
-        # rehydrate after a restart). Direct connection to triage-mcp:8081,
-        # inspected at the agent boundary (mcp_inspect). Fail-open: any setup
-        # error leaves the agent running without history rather than crash-looping.
-        if cfg.history_enabled and not mock:
-            if not cfg.history_mcp_command:
-                events.emit("history.disabled", reason="HISTORY_MCP_COMMAND unset")
-            else:
-                try:
-                    history_cm = SplunkClient(
-                        cfg.history_mcp_command, cfg.history_mcp_args,
-                        cfg.history_mcp_tool, cfg.splunk_row_limit,
-                        env=cfg.history_mcp_env,
-                        # This client talks to triage-mcp:8081 (NOT bob) — label the
-                        # call_tool CLIENT span so it draws an honest agent -> triage-mcp
-                        # map edge instead of inheriting the "splunk-bob" default.
-                        peer_service="triage-mcp",
-                    )
-                    history = await stack.enter_async_context(history_cm)
-                    await _rehydrate_history(history, cfg, state)
-                except Exception as exc:
-                    events.emit("history.init_failed",
-                                error=type(exc).__name__, message=str(exc)[:200])
+        # Task #56 stage 1: read the agent's OWN past outcomes from triage-mcp's
+        # get_alert_history (rehydrate after a restart) + refresh periodically.
+        # Each rehydrate opens a FRESH triage-mcp session (see _rehydrate_history) —
+        # a reused MCP-over-SSE session gets wedged by a triage-mcp restart and never
+        # recovers, so we never hold one open across the loop. Fail-open throughout;
+        # the call_tool CLIENT span still draws the honest agent -> triage-mcp edge
+        # (peer_service is set per fresh client). Direct connection to triage-mcp:8081,
+        # inspected at the agent boundary (mcp_inspect).
+        history_on = cfg.history_enabled and not mock and bool(cfg.history_mcp_command)
+        if cfg.history_enabled and not mock and not cfg.history_mcp_command:
+            events.emit("history.disabled", reason="HISTORY_MCP_COMMAND unset")
+        if history_on:
+            await _rehydrate_history(cfg, state)
 
         last_history_refresh = time.monotonic()
         _last_mode: tuple[str, str, Any] | None = None
         while not stop_event.is_set():
             # Task #56 stage 2: periodically refresh the recurrence snapshot so it
-            # doesn't go stale on a long-running pod. Cheap — every N minutes, not
-            # per cycle; a failed refresh keeps the previous snapshot (fail-open).
-            if (history is not None
+            # doesn't go stale on a long-running pod (fresh session each time). Cheap —
+            # every N minutes, not per cycle; a failed refresh keeps the previous
+            # snapshot (fail-open).
+            if (history_on
                     and time.monotonic() - last_history_refresh >= cfg.history_refresh_seconds):
-                await _rehydrate_history(history, cfg, state, kind="refresh")
+                await _rehydrate_history(cfg, state, kind="refresh")
                 last_history_refresh = time.monotonic()
             # Task #1: resolve the active client from the live provider flag/url
             # each cycle. Emit llm.mode only on a change (provider/model/url) so a
