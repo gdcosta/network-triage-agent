@@ -658,10 +658,10 @@ async def get_alert_history(
 @mcp.tool()
 @_traced
 async def get_alert_summary(
-    store_id: str = "", hours: int = 168
+    store_id: str = "", hours: int = 168, gap_minutes: int = 30
 ) -> dict[str, Any]:
-    """Fleet-wide alert SUMMARY — one deduplicated row per store, aggregated
-    server-side so it is NEVER truncated by the row cap.
+    """Fleet-wide alert SUMMARY — one row per INCIDENT, aggregated server-side so it
+    is NEVER truncated by the row cap.
 
     USE THIS for fleet-wide / cross-store questions — "timeline of all issues
     across the fleet", "how many stores had issues this week", "which stores were
@@ -671,8 +671,15 @@ async def get_alert_summary(
     Why this exists: while a fault is active a store re-alerts every cycle, so
     get_alert_history's most-recent-first event list fills its row cap with the
     busiest store(s) and hides quieter ones — you cannot get a full multi-store
-    timeline from it in one call. This tool aggregates with `stats`, returning one
-    row per store regardless of event volume.
+    timeline from it in one call. This tool aggregates with `stats`, so it returns
+    every incident regardless of event volume.
+
+    INCIDENT SPLITTING: a store's alert cycles are grouped into distinct incidents by
+    time gap — a quiet stretch longer than `gap_minutes` (default 30, comfortably above
+    the 15-min "still active" reminder interval) starts a NEW incident. So a store with
+    three separate faults over the week returns THREE rows (each with its own window +
+    cycle count), NOT one merged 7-day span. `incident_seq` numbers them per store
+    (1, 2, 3…). Raise gap_minutes to merge flappy incidents; lower it to split harder.
 
     Timestamps (first_seen/last_seen) are ISO-8601 UTC strings, e.g.
     "2026-07-24T04:58:00Z" — state them in UTC or convert to the requested timezone by
@@ -683,15 +690,17 @@ async def get_alert_summary(
     Args:
       store_id: optional — limit to one store. Omitted = all stores.
       hours: how far back to look (default 168 = 7 days, max 168).
+      gap_minutes: quiet gap (minutes) that separates one incident from the next
+        (default 30; floored at 1).
 
     Returns:
-      {"source": "splunk_history_summary", "hours": int, "store": str|null,
-       "incident_count": int, "truncated": false,
-       "incidents": [ {"store", "peak_severity", "root_causes": [...], "scopes": [...],
-                       "alert_cycles": int, "first_seen": "<ISO-8601 UTC>",
-                       "last_seen": "<ISO-8601 UTC>", "first_seen_epoch": float,
-                       "last_seen_epoch": float}, ... ]}
-      {"error": "<reason>"} on failure.
+      {"source": "splunk_history_summary", "hours": int, "gap_minutes": int,
+       "store": str|null, "incident_count": int, "truncated": false,
+       "incidents": [ {"store", "incident_seq": int, "peak_severity",
+                       "root_causes": [...], "scopes": [...], "alert_cycles": int,
+                       "first_seen": "<ISO-8601 UTC>", "last_seen": "<ISO-8601 UTC>",
+                       "first_seen_epoch": float, "last_seen_epoch": float}, ... ]}
+      {"error": "<reason>"} on failure. Incidents are ordered by store then time.
     """
     if not _SPLUNK_CONFIGURED:
         return {"error": "splunk_unavailable"}
@@ -700,23 +709,29 @@ async def get_alert_summary(
     earliest = f"-{hours}h"
     store_clause = f'store="{store_id}" ' if store_id else ""
 
-    # Aggregate with stats (one row per store), NOT raw events + head — so the server
-    # row cap cannot truncate the fleet view. mvjoin the multivalue fields to a stable
-    # "|"-delimited string for easy parsing. Same JSON field-extraction rules as
-    # get_alert_history (field comparisons; "triage.report" bare token as an index-time
-    # narrowing filter). action="alert" counts the alert cycles that define the incident
-    # span. Grouped by store (fleet-timeline view); a store's multiple root_causes come
-    # back as a list. (Refinement, if distinct incident-types matter: add root_cause to
-    # the `by` clause — see docs/triage-mcp-alert-history-fleet-summary-design.md.)
+    # Aggregate with stats (NOT raw events + head) so the server row cap can't truncate
+    # the fleet view. Sessionize per store by time gap: sort by store/_time, get the gap
+    # to the previous alert (streamstats window=1 last(_time)), flag a NEW incident when
+    # that gap exceeds gap_seconds (or it's the store's first event), then a running sum
+    # gives a per-store incident_seq. `stats … by store incident_seq` = one row per
+    # incident (so three distinct faults on one store = three rows, not one merged span).
+    # mvjoin the multivalue fields to a stable "|"-delimited string. Same JSON field rules
+    # as get_alert_history (field comparisons; "triage.report" bare token as an index-time
+    # narrowing filter). action="alert" counts the alert cycles per incident.
+    gap_seconds = max(60, gap_minutes * 60)
     spl = (
         f'search index={TRIAGE_EVENT_INDEX} sourcetype="kube:container:triage-agent" '
         f'"triage.report" event="triage.report" action="alert" {store_clause}earliest={earliest} '
+        f'| sort 0 store _time '
+        f'| streamstats current=f window=1 last(_time) as prev_ts by store '
+        f'| eval new_incident=if(isnull(prev_ts) OR (_time - prev_ts) > {gap_seconds}, 1, 0) '
+        f'| streamstats sum(new_incident) as incident_seq by store '
         f'| stats count as alert_cycles earliest(_time) as first_ts latest(_time) as last_ts '
-        f'values(severity) as sev values(root_cause) as causes values(scope) as scopes by store '
+        f'values(severity) as sev values(root_cause) as causes values(scope) as scopes by store incident_seq '
         f'| eval severities=mvjoin(sev,"|"), root_causes=mvjoin(causes,"|"), scopes=mvjoin(scopes,"|"), '
         f'first_utc=strftime(first_ts,"%Y-%m-%dT%H:%M:%SZ"), last_utc=strftime(last_ts,"%Y-%m-%dT%H:%M:%SZ") '
-        f'| sort first_ts '
-        f'| table store severities root_causes scopes alert_cycles first_ts last_ts first_utc last_utc'
+        f'| sort store first_ts '
+        f'| table store incident_seq severities root_causes scopes alert_cycles first_ts last_ts first_utc last_utc'
     )
     try:
         rows = await _query_splunk(
@@ -753,6 +768,7 @@ async def get_alert_summary(
         sev = [x for x in (r.get("severities") or "").split("|") if x]
         incidents.append({
             "store": r.get("store"),
+            "incident_seq": _num(r.get("incident_seq"), int),
             "peak_severity": _peak(sev),
             "root_causes": [x for x in (r.get("root_causes") or "").split("|") if x],
             "scopes": [x for x in (r.get("scopes") or "").split("|") if x],
@@ -768,6 +784,7 @@ async def get_alert_summary(
     return {
         "source": "splunk_history_summary",
         "hours": hours,
+        "gap_minutes": gap_minutes,
         "store": store_id,
         "incident_count": len(incidents),
         "truncated": False,
