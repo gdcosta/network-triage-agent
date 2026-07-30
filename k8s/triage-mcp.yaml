@@ -189,9 +189,18 @@ spec:
             # deployment.environment=insert fix). kl.kind=mcp distinguishes it.
             - name: OTEL_RESOURCE_ATTRIBUTES
               value: "deployment.environment=kl-triage,kl.kind=mcp,service.instance.id=$(POD_NAME)"
+            # v1-0-81: store->city enrichment for get_alert_summary. Same
+            # kl-triage-config ConfigMap the agent mounts (holds store_registry.json);
+            # read-only. Absent file → city stays null (tolerant loader), no failure.
+            - name: STORE_REGISTRY_PATH
+              value: /config/store_registry.json
           volumeMounts:
             - name: sidecar-identity
               mountPath: /var/run/sidecar-identity
+              readOnly: true
+            # v1-0-81: read-only view of kl-triage-config for store_registry.json.
+            - name: config
+              mountPath: /config
               readOnly: true
           ports:
             - name: mcp-sse
@@ -313,6 +322,11 @@ spec:
           emptyDir:
             medium: Memory
             sizeLimit: 1Mi
+        # v1-0-81: SOUL.md + store_registry.json — same ConfigMap the agent mounts.
+        # get_alert_summary reads store_registry.json for city enrichment.
+        - name: config
+          configMap:
+            name: kl-triage-config
 ---
 # Service the chat bot connects to via mcp-remote.
 # From kl-governance namespace, addressable as:

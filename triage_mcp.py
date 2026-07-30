@@ -65,8 +65,11 @@ import logging
 import os
 import shlex
 from contextlib import asynccontextmanager
+from datetime import datetime
+from pathlib import Path
 from time import monotonic
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import httpx
 from dotenv import load_dotenv
@@ -655,10 +658,96 @@ async def get_alert_history(
     }
 
 
+# --- geo + timezone enrichment (v1-0-81) -------------------------------------
+# City names and local-timezone rendering are computed SERVER-SIDE and handed to
+# the model as ready-to-echo strings. Two deliberate reasons:
+#   1. store -> city is a deterministic lookup, NOT something to infer
+#      ([[feedback-deterministic-identifiers]]).
+#   2. LLMs mis-compute timezone/DST math (the 2026-07-27 gpt-5.4 UTC->PDT bug:
+#      wrong labels, dates off by one). We never ask the model to convert —
+#      zoneinfo encodes every DST rule for every date, so a static offset table
+#      (which can't know whether a given date is in DST) is the wrong tool.
+
+_STORE_REGISTRY: dict[str, str] = {}
+
+
+def _load_store_registry(path: str) -> dict[str, str]:
+    """Fleet roster {store_id: 'Store 047 - Portland, OR'}. Tolerant of a missing
+    file — returns {} so city simply stays null (no regression if the ConfigMap
+    isn't mounted into the triage-mcp sidecar)."""
+    try:
+        p = Path(path)
+        if not p.is_file():
+            log.info("store_registry not at %s — city enrichment disabled", path)
+            return {}
+        raw = json.loads(p.read_text(encoding="utf-8"))
+        if not isinstance(raw, dict):
+            return {}
+        return {str(k): str(v) for k, v in raw.items() if not str(k).startswith("_")}
+    except (OSError, json.JSONDecodeError) as e:
+        log.warning("could not load store_registry from %s: %s", path, e)
+        return {}
+
+
+_STORE_REGISTRY = _load_store_registry(
+    os.environ.get("STORE_REGISTRY_PATH", "store_registry.json")
+)
+
+
+def _city_of(store: str | None) -> str | None:
+    """City ('Portland, OR') for a store id, parsed from the registry value
+    'Store <id> - <City, ST>'. None if the store is unknown / registry absent."""
+    name = _STORE_REGISTRY.get(str(store or "").strip())
+    if not name:
+        return None
+    return name.split(" - ", 1)[1].strip() if " - " in name else name.strip()
+
+
+# Friendly tz name -> IANA zone. zoneinfo then renders the CORRECT abbreviation
+# (PDT vs PST, EDT vs EST) for each timestamp automatically, so a caller can ask
+# for "PST" / "MDT" / "Eastern" and get the right label for that date.
+_TZ_ALIASES = {
+    "PT": "America/Los_Angeles", "PST": "America/Los_Angeles",
+    "PDT": "America/Los_Angeles", "PACIFIC": "America/Los_Angeles",
+    "MT": "America/Denver", "MST": "America/Denver",
+    "MDT": "America/Denver", "MOUNTAIN": "America/Denver",
+    "CT": "America/Chicago", "CST": "America/Chicago",
+    "CDT": "America/Chicago", "CENTRAL": "America/Chicago",
+    "ET": "America/New_York", "EST": "America/New_York",
+    "EDT": "America/New_York", "EASTERN": "America/New_York",
+    "UTC": "UTC", "GMT": "UTC", "Z": "UTC", "ZULU": "UTC",
+}
+
+
+def _resolve_zone(tz: str) -> tuple[ZoneInfo, str]:
+    """(ZoneInfo, iana_name) for a friendly name or a full IANA zone. Falls back
+    to UTC on anything unrecognized — NEVER raises (a bad tz must not fail the
+    query; the UTC fields are always present as a floor)."""
+    raw = (tz or "").strip()
+    if not raw:
+        return ZoneInfo("UTC"), "UTC"
+    iana = _TZ_ALIASES.get(raw.upper())
+    if iana:
+        return ZoneInfo(iana), iana
+    try:  # maybe it's already a full IANA zone, e.g. "America/New_York"
+        return ZoneInfo(raw), raw
+    except (ZoneInfoNotFoundError, ValueError):
+        log.info("unrecognized tz %r — falling back to UTC", raw)
+        return ZoneInfo("UTC"), "UTC"
+
+
+def _fmt_local(epoch: float | None, zone: ZoneInfo) -> str | None:
+    """Render an epoch as 'YYYY-MM-DD HH:MM ZZZ' in `zone` (DST-correct label)."""
+    if epoch is None:
+        return None
+    return datetime.fromtimestamp(epoch, tz=zone).strftime("%Y-%m-%d %H:%M %Z")
+
+
 @mcp.tool()
 @_traced
 async def get_alert_summary(
-    store_id: str = "", hours: int = 168, gap_minutes: int = 30
+    store_id: str = "", hours: int = 168, gap_minutes: int = 30,
+    tz: str = "America/Los_Angeles"
 ) -> dict[str, Any]:
     """Fleet-wide alert SUMMARY — one row per INCIDENT, aggregated server-side so it
     is NEVER truncated by the row cap.
@@ -681,24 +770,42 @@ async def get_alert_summary(
     cycle count), NOT one merged 7-day span. `incident_seq` numbers them per store
     (1, 2, 3…). Raise gap_minutes to merge flappy incidents; lower it to split harder.
 
-    Timestamps (first_seen/last_seen) are ISO-8601 UTC strings, e.g.
-    "2026-07-24T04:58:00Z" — state them in UTC or convert to the requested timezone by
-    offset; do NOT recompute from the *_epoch fields. For which stores are CURRENTLY
-    active (vs historical in the window), cross-reference list_active_alerts /
-    get_recent_cycle; this tool reports the history window, not live state.
+    TIMEZONE — DO NOT convert timestamps yourself. Each incident carries BOTH
+    `first_seen`/`last_seen` (ISO-8601 UTC) AND `first_seen_local`/`last_seen_local`,
+    already rendered server-side in the requested `tz` with the correct DST-aware
+    label (e.g. "2026-07-26 12:14 PDT"). When the user asks for a local timezone
+    (PDT/PST/MDT/EST/…), ECHO the *_local strings verbatim — never recompute an
+    offset from UTC or the *_epoch fields (that math is unreliable). The response's
+    top-level `timezone` field names the zone the *_local strings are in.
+
+    CITY — each incident carries a `city` field (e.g. "Portland, OR") looked up
+    deterministically from the fleet roster. When the user asks for city names,
+    use this field; do NOT infer a city from the store number yourself. `city` is
+    null only for a store not in the roster — then give the store number alone.
+
+    For which stores are CURRENTLY active (vs historical in the window),
+    cross-reference list_active_alerts / get_recent_cycle; this tool reports the
+    history window, not live state.
 
     Args:
       store_id: optional — limit to one store. Omitted = all stores.
       hours: how far back to look (default 168 = 7 days, max 168).
       gap_minutes: quiet gap (minutes) that separates one incident from the next
         (default 30; floored at 1).
+      tz: timezone for the *_local timestamp strings. Accepts friendly names
+        (PT/PST/PDT, MT/MST/MDT, CT/CST/CDT, ET/EST/EDT, UTC) or a full IANA zone
+        ("America/New_York"). Default "America/Los_Angeles" (Pacific). An
+        unrecognized value falls back to UTC (the query never fails on tz).
 
     Returns:
       {"source": "splunk_history_summary", "hours": int, "gap_minutes": int,
-       "store": str|null, "incident_count": int, "truncated": false,
-       "incidents": [ {"store", "incident_seq": int, "peak_severity",
+       "store": str|null, "timezone": "<IANA zone of *_local>", "incident_count": int,
+       "truncated": false,
+       "incidents": [ {"store", "city": str|null, "incident_seq": int, "peak_severity",
                        "root_causes": [...], "scopes": [...], "alert_cycles": int,
                        "first_seen": "<ISO-8601 UTC>", "last_seen": "<ISO-8601 UTC>",
+                       "first_seen_local": "<YYYY-MM-DD HH:MM ZZZ>",
+                       "last_seen_local": "<YYYY-MM-DD HH:MM ZZZ>",
                        "first_seen_epoch": float, "last_seen_epoch": float}, ... ]}
       {"error": "<reason>"} on failure. Incidents are ordered by store then time.
     """
@@ -706,6 +813,7 @@ async def get_alert_summary(
         return {"error": "splunk_unavailable"}
     if hours <= 0 or hours > 168:
         return {"error": "invalid_hours", "detail": "hours must be 1..168"}
+    zone, zone_name = _resolve_zone(tz)
     earliest = f"-{hours}h"
     store_clause = f'store="{store_id}" ' if store_id else ""
 
@@ -766,26 +874,36 @@ async def get_alert_summary(
     incidents: list[dict[str, Any]] = []
     for r in rows:
         sev = [x for x in (r.get("severities") or "").split("|") if x]
+        store_val = r.get("store")
+        first_epoch = _num(r.get("first_ts"), float)
+        last_epoch = _num(r.get("last_ts"), float)
         incidents.append({
-            "store": r.get("store"),
+            "store": store_val,
+            # Deterministic store->city lookup (never model-inferred). Null if the
+            # store isn't in the roster / the registry isn't mounted.
+            "city": _city_of(store_val),
             "incident_seq": _num(r.get("incident_seq"), int),
             "peak_severity": _peak(sev),
             "root_causes": [x for x in (r.get("root_causes") or "").split("|") if x],
             "scopes": [x for x in (r.get("scopes") or "").split("|") if x],
             "alert_cycles": _num(r.get("alert_cycles"), int),
-            # ISO-8601 UTC (formatted server-side) — state in UTC or convert by offset;
-            # NEVER recompute from *_epoch (LLMs mis-render epoch→datetime — the
-            # 2026-07-27 wrong-PDT bug). See [[feedback-deterministic-identifiers]].
+            # ISO-8601 UTC (server-formatted) — the always-present floor.
             "first_seen": r.get("first_utc"),
             "last_seen": r.get("last_utc"),
-            "first_seen_epoch": _num(r.get("first_ts"), float),
-            "last_seen_epoch": _num(r.get("last_ts"), float),
+            # Same instants rendered in `tz` server-side with the DST-correct label
+            # — the model ECHOES these; it must NEVER recompute an offset itself
+            # (the 2026-07-27 gpt-5.4 UTC->PDT bug). [[feedback-deterministic-identifiers]]
+            "first_seen_local": _fmt_local(first_epoch, zone),
+            "last_seen_local": _fmt_local(last_epoch, zone),
+            "first_seen_epoch": first_epoch,
+            "last_seen_epoch": last_epoch,
         })
     return {
         "source": "splunk_history_summary",
         "hours": hours,
         "gap_minutes": gap_minutes,
         "store": store_id,
+        "timezone": zone_name,
         "incident_count": len(incidents),
         "truncated": False,
         "incidents": incidents,
