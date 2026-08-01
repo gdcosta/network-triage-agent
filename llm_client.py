@@ -18,6 +18,7 @@ so within-cycle calls and consecutive polls are hits.
 """
 from __future__ import annotations
 
+import asyncio
 import copy
 import json
 import os
@@ -380,12 +381,55 @@ class LLMClient:
         # cross-store visibility — it has the window and doesn't get confused by the
         # fan-out. Detection still correlates across all stores upstream either way.
         if self._compact and len(drill_data) > 1:
+            # vLLM path ONLY (self._compact == (provider == "vllm")). Fan the
+            # one-store-per-call triage out CONCURRENTLY instead of serially: a
+            # single-store triage is ~90% decode-bound (~40s wall, mostly the
+            # ~600-token report at ~19 tok/s single-stream), and the box sustains
+            # ~271 tok/s AGGREGATE (batched) — so N serial calls waste ~93% of its
+            # decode throughput and blow the poll window (measured: 3 faults ~148s
+            # vs a ~36s cadence). vLLM continuous-batching decodes the concurrent
+            # calls in parallel, reclaiming that throughput.
+            #
+            # Bounded by a semaphore so we stay inside the box's KV budget. The
+            # KV-safe ceiling ≈ kv_cache_size_tokens / triage_context; measured
+            # today that's 58,448 / ~20.5K ≈ 2.8, so the default is 2 (no
+            # preemption). RAISE VLLM_TRIAGE_MAX_CONCURRENCY as detection-aware
+            # telemetry-shrink lowers per-call context (e.g. ~6K/call → ~9-way).
+            # Per-store fail-open: one store's error no longer sinks the others'
+            # cards (over-alerting is cheap; a missed P1 is not — minimal-
+            # suppression policy).
+            #
+            # Frontier (Anthropic / hosted-OpenAI) NEVER reaches here — self._compact
+            # is False, so it takes the single all-at-once call below with full
+            # cross-store synthesis on its large window. This branch is vLLM-only.
+            items = list(drill_data.items())
+            sem = asyncio.Semaphore(
+                max(1, int(os.environ.get("VLLM_TRIAGE_MAX_CONCURRENCY", "2")))
+            )
+
+            async def _triage_one(
+                store: str, drills: dict[str, list[dict]]
+            ) -> TriageReports:
+                async with sem:
+                    return await self._triage_call(
+                        scan_data, {store: drills}, previous_alerts, recurrence
+                    )
+
+            results = await asyncio.gather(
+                *(_triage_one(store, drills) for store, drills in items),
+                return_exceptions=True,
+            )
             merged: list[dict[str, Any]] = []
-            for store, drills in drill_data.items():
-                part = await self._triage_call(
-                    scan_data, {store: drills}, previous_alerts, recurrence
-                )
-                merged.extend(part.reports)
+            for (store, _drills), res in zip(items, results):
+                if isinstance(res, BaseException):
+                    events.emit(
+                        "llm.triage_error",
+                        model=self._model,
+                        store=store,
+                        error=repr(res),
+                    )
+                    continue
+                merged.extend(res.reports)
             return TriageReports(reports=merged, raw={"reports": merged})
         return await self._triage_call(scan_data, drill_data, previous_alerts, recurrence)
 
