@@ -18,9 +18,11 @@ so within-cycle calls and consecutive polls are hits.
 """
 from __future__ import annotations
 
+import asyncio
 import copy
 import json
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -119,6 +121,37 @@ DETECTION_TOOL: dict[str, Any] = {
         "required": ["summary", "correlate_stores", "recovery_stores"],
     },
 }
+
+
+# Reasoning-FIRST detection variant — vLLM (local) path ONLY. A non-thinking model
+# with guided decoding emits object fields in declaration order, so putting an
+# `analysis` field AHEAD of the verdict forces it to reason through the scans before
+# it can conclude. This restores the count/threshold reasoning that used to catch
+# device_offline; the answer-first base schema (summary first) let a weak model snap
+# to "healthy". Frontier keeps the BASE schema: Haiku already reasons, and the extra
+# field made it over-flag routine rows and cost ~4x tokens (measured 2026-08-04).
+# The instruction is deliberately tight — routine events = healthy, one line per
+# FLAGGED store — to avoid over-triggering and to bound the decode cost.
+DETECTION_TOOL_REASON: dict[str, Any] = copy.deepcopy(DETECTION_TOOL)
+DETECTION_TOOL_REASON["input_schema"]["properties"] = {
+    "analysis": {
+        "type": "string",
+        "description": (
+            "REASON FIRST — fill this before the other fields, briefly. For each "
+            "store, check its scan rows for a REAL anomaly: a Meraki device_offline "
+            "or wpa_deauth (a device/AP is down), an expected-healthy event type that "
+            "has dropped to zero while peers are non-zero, or an SD-WAN/TE KPI "
+            "threshold breach per SOUL Layer 1. Routine events alone (auth ok, dhcp, "
+            "firewall-allow, content-filtering, rf/poe changes) mean the store is "
+            "HEALTHY — do not flag it. Note ONLY stores with a real anomaly, one short "
+            "line each, then fill correlate_stores from what you found."
+        ),
+    },
+    **DETECTION_TOOL_REASON["input_schema"]["properties"],
+}
+DETECTION_TOOL_REASON["input_schema"]["required"] = (
+    ["analysis"] + DETECTION_TOOL_REASON["input_schema"]["required"]
+)
 
 
 TRIAGE_TOOL: dict[str, Any] = {
@@ -317,6 +350,13 @@ class LLMClient:
             self._endpoint = ""
             self._routed = "anthropic-sdk"
 
+    @property
+    def compact(self) -> bool:
+        """True on the context-bounded vLLM path (compact prompts + triage
+        chunking + telemetry summarization). False for the frontier providers.
+        Read by the scan layer to pick the detection-aware Meraki query."""
+        return self._compact
+
     async def aclose(self) -> None:
         """Release the httpx client (openai path). Called when the live toggle
         rebuilds the openai client for a new box URL, and on shutdown. No-op on
@@ -338,9 +378,34 @@ class LLMClient:
         ) as _llm:
             result = await self._call(
                 user_text=user_msg,
-                tool=DETECTION_TOOL,
+                # vLLM path gets the reasoning-first variant; frontier keeps the base
+                # answer-first schema (unchanged behavior).
+                tool=DETECTION_TOOL_REASON if self._compact else DETECTION_TOOL,
             )
             _llm.set_usage(result)
+        # Deterministic detection FLOOR. Hard, code-parseable faults (Meraki
+        # device_offline) must NOT depend on the model perceiving them: a weak
+        # local model can emit a confident "all healthy" while an AP is explicitly
+        # offline (measured 2026-08-04: Qwen3-32B-FP8 0/6, never even naming the
+        # store; neither the shrink nor an explicit SOUL rule moved it — Haiku 6/6).
+        # The floor parses the fault from scan_data and UNIONS the store in —
+        # union-only (never suppresses), identifiers from parsed content not model
+        # judgment. The model still owns correlation/triage/severity.
+        # DETECTION_FLOOR: off (default) | vllm (compact/local path only) | all.
+        correlate_stores = list(result["tool_input"].get("correlate_stores", []))
+        floor_mode = os.environ.get("DETECTION_FLOOR", "off").strip().lower()
+        if floor_mode == "all" or (floor_mode == "vllm" and self._compact):
+            have = {str(s.get("store")) for s in correlate_stores}
+            forced = _hard_fault_stores(scan_data) - have
+            for store in sorted(forced):
+                correlate_stores.append({
+                    "store": store, "site": "",
+                    "reason": ("deterministic floor: Meraki device_offline present "
+                               "(hard fault, code-detected — not model judgment)"),
+                })
+            if forced:
+                events.emit("detection.floor_applied", model=self._model,
+                            trigger="device_offline", stores=sorted(forced))
         events.emit(
             "llm.detection_pass",
             model=self._model,
@@ -350,12 +415,12 @@ class LLMClient:
             cache_create=result["usage"].get("cache_creation_input_tokens", 0),
             stop_reason=result["stop_reason"],
             summary=result["tool_input"].get("summary", ""),
-            correlate_count=len(result["tool_input"].get("correlate_stores", [])),
+            correlate_count=len(correlate_stores),
             recovery_count=len(result["tool_input"].get("recovery_stores", [])),
         )
         return DetectionDecision(
             summary=result["tool_input"].get("summary", ""),
-            correlate_stores=result["tool_input"].get("correlate_stores", []),
+            correlate_stores=correlate_stores,
             recovery_stores=result["tool_input"].get("recovery_stores", []),
             raw=result["tool_input"],
         )
@@ -380,12 +445,55 @@ class LLMClient:
         # cross-store visibility — it has the window and doesn't get confused by the
         # fan-out. Detection still correlates across all stores upstream either way.
         if self._compact and len(drill_data) > 1:
+            # vLLM path ONLY (self._compact == (provider == "vllm")). Fan the
+            # one-store-per-call triage out CONCURRENTLY instead of serially: a
+            # single-store triage is ~90% decode-bound (~40s wall, mostly the
+            # ~600-token report at ~19 tok/s single-stream), and the box sustains
+            # ~271 tok/s AGGREGATE (batched) — so N serial calls waste ~93% of its
+            # decode throughput and blow the poll window (measured: 3 faults ~148s
+            # vs a ~36s cadence). vLLM continuous-batching decodes the concurrent
+            # calls in parallel, reclaiming that throughput.
+            #
+            # Bounded by a semaphore so we stay inside the box's KV budget. The
+            # KV-safe ceiling ≈ kv_cache_size_tokens / triage_context; measured
+            # today that's 58,448 / ~20.5K ≈ 2.8, so the default is 2 (no
+            # preemption). RAISE VLLM_TRIAGE_MAX_CONCURRENCY as detection-aware
+            # telemetry-shrink lowers per-call context (e.g. ~6K/call → ~9-way).
+            # Per-store fail-open: one store's error no longer sinks the others'
+            # cards (over-alerting is cheap; a missed P1 is not — minimal-
+            # suppression policy).
+            #
+            # Frontier (Anthropic / hosted-OpenAI) NEVER reaches here — self._compact
+            # is False, so it takes the single all-at-once call below with full
+            # cross-store synthesis on its large window. This branch is vLLM-only.
+            items = list(drill_data.items())
+            sem = asyncio.Semaphore(
+                max(1, int(os.environ.get("VLLM_TRIAGE_MAX_CONCURRENCY", "2")))
+            )
+
+            async def _triage_one(
+                store: str, drills: dict[str, list[dict]]
+            ) -> TriageReports:
+                async with sem:
+                    return await self._triage_call(
+                        scan_data, {store: drills}, previous_alerts, recurrence
+                    )
+
+            results = await asyncio.gather(
+                *(_triage_one(store, drills) for store, drills in items),
+                return_exceptions=True,
+            )
             merged: list[dict[str, Any]] = []
-            for store, drills in drill_data.items():
-                part = await self._triage_call(
-                    scan_data, {store: drills}, previous_alerts, recurrence
-                )
-                merged.extend(part.reports)
+            for (store, _drills), res in zip(items, results):
+                if isinstance(res, BaseException):
+                    events.emit(
+                        "llm.triage_error",
+                        model=self._model,
+                        store=store,
+                        error=repr(res),
+                    )
+                    continue
+                merged.extend(res.reports)
             return TriageReports(reports=merged, raw={"reports": merged})
         return await self._triage_call(scan_data, drill_data, previous_alerts, recurrence)
 
@@ -559,6 +667,26 @@ class LLMClient:
 
 
 # ---------- prompt construction ----------
+
+# Hard-fault Meraki event types that trip the deterministic detection FLOOR —
+# unambiguous "device is down" signals a weak local model may not perceive at all.
+# Kept intentionally tight (device_offline only); widen deliberately, never casually,
+# because the floor forces a detection regardless of model judgment.
+_HARD_FAULT_MERAKI_TYPES = {"device_offline"}
+
+
+def _hard_fault_stores(scan_data: dict[str, list[dict]]) -> set[str]:
+    """Stores (3-digit) that have a hard Meraki fault in scan_data, parsed
+    DETERMINISTICALLY from networkId (not model inference): 'N_KL0000112' -> '112'.
+    Backs the detection floor in detection_pass."""
+    stores: set[str] = set()
+    for row in scan_data.get("meraki") or []:
+        if row.get("type") in _HARD_FAULT_MERAKI_TYPES:
+            m = re.search(r"(\d{3})$", str(row.get("networkId", "")))
+            if m:
+                stores.add(m.group(1))
+    return stores
+
 
 # Telemetry rendering is provider-aware. The frontier path (Anthropic/Haiku, 200K
 # window) gets indented JSON — readable, and it has the context to spare. The
