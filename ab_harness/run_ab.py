@@ -82,6 +82,8 @@ def _new_score():
 async def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--runs", type=int, default=1, help="repeat each fixture N times")
+    ap.add_argument("--only", default=None,
+                    help="run only fixtures whose id contains this substring (e.g. ap_offline)")
     args = ap.parse_args()
 
     soul = os.environ.get("SOUL_PATH", "SOUL.md")
@@ -95,6 +97,9 @@ async def main():
     ]
     score = {label: _new_score() for label, _ in models}
     fixtures = _load_fixtures()
+    if args.only:
+        fixtures = [fx for fx in fixtures if args.only in fx.get("id", "")]
+        print(f"(--only {args.only!r}: {len(fixtures)} fixture(s))")
 
     for fx in fixtures:
         ref = fx.get("reference", {})

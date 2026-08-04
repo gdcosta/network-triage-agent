@@ -6,6 +6,8 @@ SOUL's "ignore internal test tooling" rule.
 """
 from __future__ import annotations
 
+import os
+
 _EXCLUDE_SCENARIO = ' NOT sourcetype="kl:scenario_controller:log"'
 
 
@@ -86,6 +88,72 @@ SCAN_MERAKI = (
   by networkId, sourcetype, type
 | sort networkId, sourcetype, type
 """)
+
+
+# --- Detection-aware Meraki telemetry shrink (vLLM prefill lever) -------------
+# The Meraki scan is ~68% of the detection payload and ~99.9% byte-identical
+# routine noise cycle-to-cycle. SCAN_MERAKI_COMPACT collapses the routine rows
+# into one per-store "routine_nominal" summary while keeping every diagnostic
+# row in full — same output columns as SCAN_MERAKI, so the prompt render is
+# unchanged.
+#
+# THE SAFETY RULE — blocklist, not allowlist. Only these verified always-nominal
+# types are summarized. Everything else — device_offline (the AP fault the small
+# models missed), wpa_deauth, dhcp_problem, port bounces, vpn_registry_change,
+# and any NOVEL/unknown type — stays a full "signal" row, so no new fault class
+# is ever silently hidden. port_status/rf_change/vpn_registry_change LOOK routine
+# but can carry a real fault, so they are deliberately NOT summarized.
+#
+# Validated 2026-08-02 against a live device_offline fault (bob index=main):
+# 56 -> 26 rows, all 20 signal rows preserved, set-diff of dropped signals = 0.
+# See RUNBOOK "Detection-aware telemetry shrink".
+_MERAKI_ROUTINE_TYPES = (
+    "8021x_eap_success", "wpa_auth", "dhcp_lease",
+    "firewall_allow", "content_filtering", "poe_budget_change",
+)
+
+_MERAKI_ROUTINE_IN = ", ".join('"%s"' % t for t in _MERAKI_ROUTINE_TYPES)
+
+SCAN_MERAKI_COMPACT = (
+    'index=main sourcetype IN ("meraki:accesspoints",'
+    '"meraki:switches","meraki:securityappliances")'
+    + _EXCLUDE_SCENARIO + r"""
+| spath output=type path=type
+| spath output=networkId path=networkId
+| spath output=deviceName path=deviceName
+| spath output=description path=description
+| eval class=if(type IN (""" + _MERAKI_ROUTINE_IN + r"""), "routine", "signal")
+| stats count, dc(deviceName) AS device_count,
+    values(description) AS descriptions
+  by networkId, sourcetype, type, class
+| appendpipe
+    [ where class="routine"
+    | stats sum(count) AS count, dc(type) AS routine_types by networkId
+    | eval sourcetype="meraki", type="routine_nominal", class="summary",
+        descriptions="routine nominal: ".tostring(routine_types)." types, ".tostring(count)." events" ]
+| where class="signal" OR type="routine_nominal"
+| fields - class routine_types
+| sort networkId, sourcetype, type
+""")
+
+
+# Feature flag (env, read live each cycle) — collapse routine Meraki rows on the
+# compact (vLLM) path ONLY. Default OFF: deploy dark, then flip to run the A/B.
+# The frontier (Anthropic / hosted-OpenAI) path ALWAYS gets the full SCAN_MERAKI.
+MERAKI_COMPACT_FLAG = "VLLM_MERAKI_COMPACT_SCAN"
+
+
+def _flag_on(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def scan_meraki(compact: bool = False) -> str:
+    """Meraki scan query. Returns the detection-aware summarization only when the
+    caller is on the compact (vLLM) path AND the VLLM_MERAKI_COMPACT_SCAN flag is
+    enabled; otherwise the full SCAN_MERAKI (frontier default, unchanged)."""
+    if compact and _flag_on(MERAKI_COMPACT_FLAG):
+        return SCAN_MERAKI_COMPACT
+    return SCAN_MERAKI
 
 
 SCAN_ISE = (

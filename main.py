@@ -265,11 +265,17 @@ async def _run_cycle(
     )
 
     # 1. Scan
+    #    Meraki scan is provider-conditional: the vLLM (compact) path uses the
+    #    detection-aware summarization when the VLLM_MERAKI_COMPACT_SCAN flag is
+    #    on; frontier always gets the full query. getattr keeps mock_llm safe.
     with tracing.span("scan"):
         sdwan, te, meraki, ise = await asyncio.gather(
             splunk.run_query(queries.SCAN_SDWAN, cfg.earliest_time, cfg.latest_time),
             splunk.run_query(queries.SCAN_TE, cfg.earliest_time, cfg.latest_time),
-            splunk.run_query(queries.SCAN_MERAKI, cfg.earliest_time, cfg.latest_time),
+            splunk.run_query(
+                queries.scan_meraki(compact=getattr(llm, "compact", False)),
+                cfg.earliest_time, cfg.latest_time,
+            ),
             splunk.run_query(queries.SCAN_ISE, cfg.earliest_time, cfg.latest_time),
         )
     scan_data = {"sdwan": sdwan, "te": te, "meraki": meraki, "ise": ise}
