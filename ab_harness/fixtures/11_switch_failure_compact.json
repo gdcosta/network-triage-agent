@@ -205,8 +205,8 @@
         "networkId": "N_KL0000237",
         "sourcetype": "meraki",
         "type": "routine_nominal",
-        "count": "604",
-        "descriptions": "routine nominal: 6 types, 604 events"
+        "count": "352",
+        "descriptions": "routine nominal: 5 types, 352 events"
       },
       {
         "networkId": "N_KL0000237",
@@ -223,6 +223,17 @@
         "count": "50",
         "device_count": "1",
         "descriptions": "RF environment changed"
+      },
+      {
+        "networkId": "N_KL0000237",
+        "sourcetype": "meraki:accesspoints",
+        "type": "wpa_auth",
+        "count": "252",
+        "device_count": "3",
+        "descriptions": [
+          "WPA authentication successful",
+          "WPA authentication \u2014 roamed from KL-237-PDX-AP-1"
+        ]
       },
       {
         "networkId": "N_KL0000237",

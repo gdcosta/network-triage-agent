@@ -82,8 +82,17 @@ def to_compact(full_rows):
 
     out = []
     for nid, rows in by_nid.items():
-        routine = [r for r in rows if r["type"] in ROUTINE_TYPES]
-        signal = [r for r in rows if r["type"] not in ROUTINE_TYPES]
+        has_deauth = any(r["type"] == "wpa_deauth" for r in rows)
+
+        def _routine(r):
+            # FLAP FIX (matches queries.py): keep wpa_auth as a SIGNAL row when this
+            # networkId also has wpa_deauth (preserve the auth-vs-deauth ratio).
+            if r["type"] == "wpa_auth" and has_deauth:
+                return False
+            return r["type"] in ROUTINE_TYPES
+
+        routine = [r for r in rows if _routine(r)]
+        signal = [r for r in rows if not _routine(r)]
         out.extend(signal)  # signal rows preserved verbatim (incl. device_count)
         if routine:
             total = sum(int(r["count"]) for r in routine)

@@ -107,6 +107,14 @@ SCAN_MERAKI = (
 # Validated 2026-08-02 against a live device_offline fault (bob index=main):
 # 56 -> 26 rows, all 20 signal rows preserved, set-diff of dropped signals = 0.
 # See RUNBOOK "Detection-aware telemetry shrink".
+#
+# 2026-08-08 FLAP FIX — the ONE exception to the blocklist. `wpa_auth` is normally
+# routine, but a Wi-Fi FLAP shows as high wpa_auth (re-association) + wpa_deauth
+# churn; summarizing the auth destroys the auth-vs-deauth RATIO the model needs to
+# call it (A/B: Qwen full 10/10 vs old blanket-compact 0/10 on ab_harness 08/09).
+# So wpa_auth is KEPT as a signal row for any networkId that ALSO has wpa_deauth
+# (a fault marker, ~0 on healthy stores) — preserving the ratio where it matters
+# while still collapsing routine auth on healthy stores. Everything else unchanged.
 _MERAKI_ROUTINE_TYPES = (
     "8021x_eap_success", "wpa_auth", "dhcp_lease",
     "firewall_allow", "content_filtering", "poe_budget_change",
@@ -122,7 +130,8 @@ SCAN_MERAKI_COMPACT = (
 | spath output=networkId path=networkId
 | spath output=deviceName path=deviceName
 | spath output=description path=description
-| eval class=if(type IN (""" + _MERAKI_ROUTINE_IN + r"""), "routine", "signal")
+| eventstats max(eval(if(type=="wpa_deauth", 1, 0))) AS net_has_deauth by networkId
+| eval class=case(type=="wpa_auth" AND net_has_deauth==1, "signal", type IN (""" + _MERAKI_ROUTINE_IN + r"""), "routine", 1==1, "signal")
 | stats count, dc(deviceName) AS device_count,
     values(description) AS descriptions
   by networkId, sourcetype, type, class

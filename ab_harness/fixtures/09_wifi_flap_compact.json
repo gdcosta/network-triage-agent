@@ -234,10 +234,11 @@
       },
       {
         "networkId": "N_KL0000305",
-        "sourcetype": "meraki",
-        "type": "routine_nominal",
+        "sourcetype": "meraki:accesspoints",
+        "type": "wpa_auth",
         "count": "18",
-        "descriptions": "routine nominal: 1 types, 18 events"
+        "device_count": "1",
+        "descriptions": "WPA authentication"
       },
       {
         "networkId": "N_KL0000305",
