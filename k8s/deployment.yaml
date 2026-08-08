@@ -129,14 +129,13 @@ spec:
             - name: VLLM_DISABLE_THINKING
               value: "true"
             # Detection-aware Meraki telemetry shrink — vLLM (compact) path ONLY.
-            # Collapses the 6 always-nominal Meraki event types into one per-store
-            # "routine_nominal" row; device_offline and every non-routine/novel type
-            # stay FULL signal rows (queries.SCAN_MERAKI_COMPACT). ~54% row cut,
-            # validated 0 signal loss (2026-08-02). Frontier ALWAYS gets full
-            # SCAN_MERAKI regardless of this flag. Enabled 2026-08-08 after the
-            # AP-offline A/B gate.
+            # DISABLED 2026-08-08: the A/B gate found it BLINDS Wi-Fi-flap detection
+            # (Qwen full 10/10 vs compact 0/10) — summarizing wpa_auth destroys the
+            # auth-vs-deauth ratio a flap needs. ap_offline + switch_failure were
+            # unaffected. Re-enable ONLY after the queries.py flap fix (keep wpa_auth
+            # as signal when wpa_deauth co-occurs) ships and all 3 A/B pairs pass.
             - name: VLLM_MERAKI_COMPACT_SCAN
-              value: "true"
+              value: "false"
             # Fan-out concurrency cap for the vLLM triage path (provider-conditional;
             # frontier keeps the single all-stores call). Raised 4->5 on 2026-08-08
             # after VLLM_MERAKI_COMPACT_SCAN lowered per-request context — an
