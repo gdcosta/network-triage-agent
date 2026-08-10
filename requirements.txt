@@ -12,10 +12,17 @@ aiohttp>=3.9
 # which otel-api REMOVED after ~1.42 — a looser floor (>=1.38) lets pip resolve to
 # 1.44 (latest) and the GenAI util then fails to import → GenAI silently falls back
 # to off. 1.38.x still ships _events AND meets the Splunk AI Agent Monitoring floor.
+# 2026-08-10 FIX: pin opentelemetry-api EXPLICITLY. sdk==1.38.0 alone did NOT hold
+# it — api is a transitive dep, and a zip-rebuild ~2026-08-01 let it drift past 1.42
+# (where _events was removed) → the GenAI util failed to import → gen_ai metrics for
+# kl-triage flatlined on 2026-08-03 (AI Overview stopped populating). This pin locks it.
+opentelemetry-api==1.38.0
 opentelemetry-sdk==1.38.0
 opentelemetry-exporter-otlp-proto-grpc==1.38.0
 # AI Agent Monitoring (Phase 1b) — Splunk OTel GenAI utility. Emits GenAI
 # Agent/LLM spans + gen_ai.client.* histograms → O11y AI Agent Monitoring. Imported
 # only when KL_GENAI_ENABLED=true (genai.py guards it). >=0.1.15 clears the
-# content-capture size issue in <=0.1.13 (we send NO_CONTENT regardless).
-splunk-otel-util-genai>=0.1.15
+# content-capture size issue in <=0.1.13 (we send NO_CONTENT regardless). EXACT-pinned
+# 2026-08-10 (was >=0.1.15): a loose floor let a rebuild pull a newer release needing
+# otel-api>1.42 → the _events import break above. 0.1.15 works with api/sdk 1.38.
+splunk-otel-util-genai==0.1.15
