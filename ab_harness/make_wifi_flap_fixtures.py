@@ -136,7 +136,39 @@ ISE = json.loads(r"""
 MERAKI_FULL = build_full()
 MERAKI_COMPACT = to_compact(MERAKI_FULL)
 
-REFERENCE = {"detect_stores": ["305"], "severity": None}  # detection-only test
+# Per-store drill results for 305 (consistent with the encoded flap: wpa_deauth
+# on AP-3, all other domains healthy). Non-empty drill_data makes run_ab call
+# triage_pass, so the fixture now scores SEVERITY (the flap-fix gate), not just
+# detection. correlate_timeline is Meraki-only → root cause = In-Store LAN.
+DRILL_305 = {
+    "drill_meraki": [
+        {"sourcetype": "meraki:accesspoints", "type": "wpa_deauth", "count": "36", "device_count": "1", "devices": "KL-305-SEA-AP-3", "descriptions": "WPA deauthentication — client RSSI below threshold"},
+        {"sourcetype": "meraki:accesspoints", "type": "wpa_auth", "count": "18", "device_count": "3", "devices": ["KL-305-SEA-AP-1", "KL-305-SEA-AP-2", "KL-305-SEA-AP-3"], "descriptions": "WPA authentication successful"},
+        {"sourcetype": "meraki:accesspoints", "type": "rf_change", "count": "9", "device_count": "1", "devices": "KL-305-SEA-AP-1", "descriptions": "RF environment changed"},
+        {"sourcetype": "meraki:switches", "type": "port_status", "count": "20", "device_count": "2", "devices": ["KL-305-SEA-MS-1", "KL-305-SEA-MS-2"], "descriptions": "Port status changed"},
+    ],
+    "drill_sdwan": [
+        {"color": "SITE_SUMMARY", "site_health": "good", "bfd_up": "2", "bfd_down": "0", "reachability": "reachable"},
+        {"color": "mpls", "tunnel_state": "up", "jitter_ms": "4.6", "latency_ms": "15.5", "loss_pct": "0.3", "vqoe": "7", "event_count": "20"},
+    ],
+    "drill_te": [
+        {"sourcetype": "cisco:thousandeyes:alerts", "alert_cleared": "true", "severity": "NONE", "avg_resp_ms": "50.7", "isp_status": "healthy", "edge_status": "healthy", "conclusion": "All hops within threshold - no issues detected"},
+    ],
+    "drill_ise": [
+        {"ise_event": "CISE_Passed_Authentications", "user": "guest_wifi", "count": "38", "nas_count": "2", "nas_ips": ["10.10.50.11", "10.10.50.13"]},
+    ],
+    "correlate_timeline": [
+        {"_time": "2026-08-09T00:19:40", "domain": "MERAKI", "sourcetype": "meraki:accesspoints", "detail": "wpa_deauth on KL-305-SEA-AP-3 | WPA deauthentication — client RSSI below threshold"},
+        {"_time": "2026-08-09T00:20:12", "domain": "MERAKI", "sourcetype": "meraki:accesspoints", "detail": "wpa_deauth on KL-305-SEA-AP-3 | WPA deauthentication — client RSSI below threshold"},
+        {"_time": "2026-08-09T00:20:48", "domain": "MERAKI", "sourcetype": "meraki:accesspoints", "detail": "wpa_auth on KL-305-SEA-AP-3 | WPA authentication successful"},
+        {"_time": "2026-08-09T00:21:20", "domain": "MERAKI", "sourcetype": "meraki:accesspoints", "detail": "wpa_deauth on KL-305-SEA-AP-3 | WPA deauthentication — client RSSI below threshold"},
+        {"_time": "2026-08-09T00:21:55", "domain": "MERAKI", "sourcetype": "meraki:accesspoints", "detail": "wpa_deauth on KL-305-SEA-AP-3 | WPA deauthentication — client RSSI below threshold"},
+    ],
+}
+
+# Severity gate: baseline SOUL.md triages this flap as RESOLVED/no_alert; the
+# SOUL.flapfix.md rule should rate it P3 MEDIUM (a card). dedup=send (first seen).
+REFERENCE = {"detect_stores": ["305"], "severity": "P3 MEDIUM", "dedup_decision": "send"}
 
 FIXTURES = [
     {"id": "08_wifi_flap_full", "fault_type": "wifi_flap",
@@ -144,7 +176,7 @@ FIXTURES = [
                      "threshold'), FULL meraki scan; all other stores healthy. Captured live "
                      "2026-08-08 (networkId N_KL0000305, agent -5m window). Expect detect=305."),
      "previous_alerts": {}, "scan_data": {"sdwan": SDWAN, "te": TE, "meraki": MERAKI_FULL, "ise": ISE},
-     "drill_data": {}, "reference": REFERENCE},
+     "drill_data": {"305": DRILL_305}, "reference": REFERENCE},
 
     {"id": "09_wifi_flap_compact", "fault_type": "wifi_flap",
      "description": ("IDENTICAL to 08 except meraki = SCAN_MERAKI_COMPACT: 305's routine wpa_auth "
@@ -152,7 +184,7 @@ FIXTURES = [
                      "full signal row. Tests whether summarizing the auth churn blunts flap "
                      "detection. Expect detect=305 (compact should NOT blind it)."),
      "previous_alerts": {}, "scan_data": {"sdwan": SDWAN, "te": TE, "meraki": MERAKI_COMPACT, "ise": ISE},
-     "drill_data": {}, "reference": REFERENCE},
+     "drill_data": {"305": DRILL_305}, "reference": REFERENCE},
 ]
 
 for f in FIXTURES:
