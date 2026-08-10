@@ -1,0 +1,707 @@
+{
+  "id": "08_wifi_flap_full",
+  "fault_type": "wifi_flap",
+  "description": "Store 305 Wi-Fi flap (wpa_auth churn + wpa_deauth 'client RSSI below threshold'), FULL meraki scan; all other stores healthy. Captured live 2026-08-08 (networkId N_KL0000305, agent -5m window). Expect detect=305.",
+  "previous_alerts": {},
+  "scan_data": {
+    "sdwan": [
+      {
+        "hostname": "kl-047-pdx-rtr-1",
+        "site_health": "good",
+        "device_status": "normal",
+        "reachability": "reachable",
+        "bfd_up": "2",
+        "bfd_down": "0",
+        "tunnel_states": "up",
+        "transports": "mpls",
+        "avg_jitter": "4.2",
+        "avg_latency": "20.3",
+        "max_loss": "0.2",
+        "min_vqoe": "7"
+      },
+      {
+        "hostname": "kl-237-pdx-rtr-1",
+        "site_health": "good",
+        "device_status": "normal",
+        "reachability": "reachable",
+        "bfd_up": "2",
+        "bfd_down": "0",
+        "tunnel_states": "up",
+        "transports": "mpls",
+        "avg_jitter": "4.5",
+        "avg_latency": "15.5",
+        "max_loss": "0.3",
+        "min_vqoe": "7"
+      },
+      {
+        "hostname": "kl-305-sea-rtr-1",
+        "site_health": "good",
+        "device_status": "normal",
+        "reachability": "reachable",
+        "bfd_up": "2",
+        "bfd_down": "0",
+        "tunnel_states": "up",
+        "transports": "mpls",
+        "avg_jitter": "4.6",
+        "avg_latency": "15.5",
+        "max_loss": "0.3",
+        "min_vqoe": "7"
+      },
+      {
+        "hostname": "kl-418-lax-rtr-1",
+        "site_health": "good",
+        "device_status": "normal",
+        "reachability": "reachable",
+        "bfd_up": "2",
+        "bfd_down": "0",
+        "tunnel_states": "up",
+        "transports": "mpls",
+        "avg_jitter": "5.3",
+        "avg_latency": "18.2",
+        "max_loss": "0.3",
+        "min_vqoe": "8"
+      },
+      {
+        "hostname": "kl-521-san-rtr-1",
+        "site_health": "good",
+        "device_status": "normal",
+        "reachability": "reachable",
+        "bfd_up": "2",
+        "bfd_down": "0",
+        "tunnel_states": "up",
+        "transports": "mpls",
+        "avg_jitter": "5.8",
+        "avg_latency": "18.1",
+        "max_loss": "0.3",
+        "min_vqoe": "7"
+      }
+    ],
+    "te": [
+      {
+        "site": "LosAngeles",
+        "alert_cleared": "true",
+        "severity": "NONE",
+        "avg_resp_ms": "48.1",
+        "max_resp_ms": "60",
+        "max_loss_pct": "0.3",
+        "max_jitter": "8",
+        "isp_status": "healthy",
+        "edge_status": "healthy",
+        "path_conclusion": "All hops within threshold - no issues detected",
+        "bgp_status": "healthy",
+        "bgp_reach_pct": "99.5",
+        "bgp_path_changes": "6"
+      },
+      {
+        "site": "Portland",
+        "alert_cleared": "true",
+        "severity": "NONE",
+        "avg_resp_ms": "49.4",
+        "max_resp_ms": "65",
+        "max_loss_pct": "0.3",
+        "max_jitter": "8",
+        "isp_status": "healthy",
+        "edge_status": "healthy",
+        "path_conclusion": "All hops within threshold - no issues detected",
+        "bgp_status": "healthy",
+        "bgp_reach_pct": "100.0",
+        "bgp_path_changes": "18"
+      },
+      {
+        "site": "SanDiego",
+        "alert_cleared": "true",
+        "severity": "NONE",
+        "avg_resp_ms": "47.4",
+        "max_resp_ms": "60",
+        "max_loss_pct": "0.2",
+        "max_jitter": "8",
+        "isp_status": "healthy",
+        "edge_status": "healthy",
+        "path_conclusion": "All hops within threshold - no issues detected",
+        "bgp_status": "healthy",
+        "bgp_reach_pct": "99.7",
+        "bgp_path_changes": "7"
+      },
+      {
+        "site": "Seattle",
+        "alert_cleared": "true",
+        "severity": "NONE",
+        "avg_resp_ms": "50.7",
+        "max_resp_ms": "61",
+        "max_loss_pct": "0.3",
+        "max_jitter": "8",
+        "isp_status": "healthy",
+        "edge_status": "healthy",
+        "path_conclusion": "All hops within threshold - no issues detected",
+        "bgp_status": "healthy",
+        "bgp_reach_pct": "99.7",
+        "bgp_path_changes": "12"
+      }
+    ],
+    "meraki": [
+      {
+        "networkId": "N_KL0000047",
+        "sourcetype": "meraki:accesspoints",
+        "type": "8021x_eap_success",
+        "count": "20",
+        "device_count": "1",
+        "descriptions": "802.1X EAP authentication succeeded"
+      },
+      {
+        "networkId": "N_KL0000047",
+        "sourcetype": "meraki:accesspoints",
+        "type": "rf_change",
+        "count": "10",
+        "device_count": "1",
+        "descriptions": "RF environment changed"
+      },
+      {
+        "networkId": "N_KL0000047",
+        "sourcetype": "meraki:accesspoints",
+        "type": "wpa_auth",
+        "count": "50",
+        "device_count": "3",
+        "descriptions": "WPA authentication successful"
+      },
+      {
+        "networkId": "N_KL0000047",
+        "sourcetype": "meraki:securityappliances",
+        "type": "content_filtering",
+        "count": "10",
+        "device_count": "1",
+        "descriptions": "Content filtering event"
+      },
+      {
+        "networkId": "N_KL0000047",
+        "sourcetype": "meraki:securityappliances",
+        "type": "dhcp_lease",
+        "count": "10",
+        "device_count": "1",
+        "descriptions": "DHCP lease granted"
+      },
+      {
+        "networkId": "N_KL0000047",
+        "sourcetype": "meraki:securityappliances",
+        "type": "firewall_allow",
+        "count": "10",
+        "device_count": "1",
+        "descriptions": "Firewall rule allowed traffic"
+      },
+      {
+        "networkId": "N_KL0000047",
+        "sourcetype": "meraki:securityappliances",
+        "type": "vpn_registry_change",
+        "count": "10",
+        "device_count": "1",
+        "descriptions": "VPN connectivity change"
+      },
+      {
+        "networkId": "N_KL0000047",
+        "sourcetype": "meraki:switches",
+        "type": "poe_budget_change",
+        "count": "20",
+        "device_count": "2",
+        "descriptions": "PoE budget updated"
+      },
+      {
+        "networkId": "N_KL0000047",
+        "sourcetype": "meraki:switches",
+        "type": "port_status",
+        "count": "20",
+        "device_count": "2",
+        "descriptions": "Port status changed"
+      },
+      {
+        "networkId": "N_KL0000112",
+        "sourcetype": "meraki:accesspoints",
+        "type": "8021x_eap_success",
+        "count": "20",
+        "device_count": "1",
+        "descriptions": "802.1X EAP authentication succeeded"
+      },
+      {
+        "networkId": "N_KL0000112",
+        "sourcetype": "meraki:accesspoints",
+        "type": "rf_change",
+        "count": "10",
+        "device_count": "1",
+        "descriptions": "RF environment changed"
+      },
+      {
+        "networkId": "N_KL0000112",
+        "sourcetype": "meraki:accesspoints",
+        "type": "wpa_auth",
+        "count": "50",
+        "device_count": "3",
+        "descriptions": "WPA authentication successful"
+      },
+      {
+        "networkId": "N_KL0000112",
+        "sourcetype": "meraki:securityappliances",
+        "type": "content_filtering",
+        "count": "10",
+        "device_count": "1",
+        "descriptions": "Content filtering event"
+      },
+      {
+        "networkId": "N_KL0000112",
+        "sourcetype": "meraki:securityappliances",
+        "type": "dhcp_lease",
+        "count": "10",
+        "device_count": "1",
+        "descriptions": "DHCP lease granted"
+      },
+      {
+        "networkId": "N_KL0000112",
+        "sourcetype": "meraki:securityappliances",
+        "type": "firewall_allow",
+        "count": "10",
+        "device_count": "1",
+        "descriptions": "Firewall rule allowed traffic"
+      },
+      {
+        "networkId": "N_KL0000112",
+        "sourcetype": "meraki:securityappliances",
+        "type": "vpn_registry_change",
+        "count": "10",
+        "device_count": "1",
+        "descriptions": "VPN connectivity change"
+      },
+      {
+        "networkId": "N_KL0000112",
+        "sourcetype": "meraki:switches",
+        "type": "poe_budget_change",
+        "count": "20",
+        "device_count": "2",
+        "descriptions": "PoE budget updated"
+      },
+      {
+        "networkId": "N_KL0000112",
+        "sourcetype": "meraki:switches",
+        "type": "port_status",
+        "count": "20",
+        "device_count": "2",
+        "descriptions": "Port status changed"
+      },
+      {
+        "networkId": "N_KL0000237",
+        "sourcetype": "meraki:accesspoints",
+        "type": "8021x_eap_success",
+        "count": "20",
+        "device_count": "1",
+        "descriptions": "802.1X EAP authentication succeeded"
+      },
+      {
+        "networkId": "N_KL0000237",
+        "sourcetype": "meraki:accesspoints",
+        "type": "rf_change",
+        "count": "10",
+        "device_count": "1",
+        "descriptions": "RF environment changed"
+      },
+      {
+        "networkId": "N_KL0000237",
+        "sourcetype": "meraki:accesspoints",
+        "type": "wpa_auth",
+        "count": "50",
+        "device_count": "3",
+        "descriptions": "WPA authentication successful"
+      },
+      {
+        "networkId": "N_KL0000237",
+        "sourcetype": "meraki:securityappliances",
+        "type": "content_filtering",
+        "count": "10",
+        "device_count": "1",
+        "descriptions": "Content filtering event"
+      },
+      {
+        "networkId": "N_KL0000237",
+        "sourcetype": "meraki:securityappliances",
+        "type": "dhcp_lease",
+        "count": "10",
+        "device_count": "1",
+        "descriptions": "DHCP lease granted"
+      },
+      {
+        "networkId": "N_KL0000237",
+        "sourcetype": "meraki:securityappliances",
+        "type": "firewall_allow",
+        "count": "10",
+        "device_count": "1",
+        "descriptions": "Firewall rule allowed traffic"
+      },
+      {
+        "networkId": "N_KL0000237",
+        "sourcetype": "meraki:securityappliances",
+        "type": "vpn_registry_change",
+        "count": "10",
+        "device_count": "1",
+        "descriptions": "VPN connectivity change"
+      },
+      {
+        "networkId": "N_KL0000237",
+        "sourcetype": "meraki:switches",
+        "type": "poe_budget_change",
+        "count": "20",
+        "device_count": "2",
+        "descriptions": "PoE budget updated"
+      },
+      {
+        "networkId": "N_KL0000237",
+        "sourcetype": "meraki:switches",
+        "type": "port_status",
+        "count": "20",
+        "device_count": "2",
+        "descriptions": "Port status changed"
+      },
+      {
+        "networkId": "N_KL0000305",
+        "sourcetype": "meraki:accesspoints",
+        "type": "wpa_auth",
+        "count": "18",
+        "device_count": "1",
+        "descriptions": "WPA authentication"
+      },
+      {
+        "networkId": "N_KL0000305",
+        "sourcetype": "meraki:accesspoints",
+        "type": "wpa_deauth",
+        "count": "36",
+        "device_count": "1",
+        "descriptions": "WPA deauthentication \u2014 client RSSI below threshold"
+      },
+      {
+        "networkId": "N_KL0000418",
+        "sourcetype": "meraki:accesspoints",
+        "type": "8021x_eap_success",
+        "count": "20",
+        "device_count": "1",
+        "descriptions": "802.1X EAP authentication succeeded"
+      },
+      {
+        "networkId": "N_KL0000418",
+        "sourcetype": "meraki:accesspoints",
+        "type": "rf_change",
+        "count": "10",
+        "device_count": "1",
+        "descriptions": "RF environment changed"
+      },
+      {
+        "networkId": "N_KL0000418",
+        "sourcetype": "meraki:accesspoints",
+        "type": "wpa_auth",
+        "count": "50",
+        "device_count": "3",
+        "descriptions": "WPA authentication successful"
+      },
+      {
+        "networkId": "N_KL0000418",
+        "sourcetype": "meraki:securityappliances",
+        "type": "content_filtering",
+        "count": "10",
+        "device_count": "1",
+        "descriptions": "Content filtering event"
+      },
+      {
+        "networkId": "N_KL0000418",
+        "sourcetype": "meraki:securityappliances",
+        "type": "dhcp_lease",
+        "count": "10",
+        "device_count": "1",
+        "descriptions": "DHCP lease granted"
+      },
+      {
+        "networkId": "N_KL0000418",
+        "sourcetype": "meraki:securityappliances",
+        "type": "firewall_allow",
+        "count": "10",
+        "device_count": "1",
+        "descriptions": "Firewall rule allowed traffic"
+      },
+      {
+        "networkId": "N_KL0000418",
+        "sourcetype": "meraki:securityappliances",
+        "type": "vpn_registry_change",
+        "count": "10",
+        "device_count": "1",
+        "descriptions": "VPN connectivity change"
+      },
+      {
+        "networkId": "N_KL0000418",
+        "sourcetype": "meraki:switches",
+        "type": "poe_budget_change",
+        "count": "20",
+        "device_count": "2",
+        "descriptions": "PoE budget updated"
+      },
+      {
+        "networkId": "N_KL0000418",
+        "sourcetype": "meraki:switches",
+        "type": "port_status",
+        "count": "20",
+        "device_count": "2",
+        "descriptions": "Port status changed"
+      },
+      {
+        "networkId": "N_KL0000521",
+        "sourcetype": "meraki:accesspoints",
+        "type": "8021x_eap_success",
+        "count": "20",
+        "device_count": "1",
+        "descriptions": "802.1X EAP authentication succeeded"
+      },
+      {
+        "networkId": "N_KL0000521",
+        "sourcetype": "meraki:accesspoints",
+        "type": "rf_change",
+        "count": "10",
+        "device_count": "1",
+        "descriptions": "RF environment changed"
+      },
+      {
+        "networkId": "N_KL0000521",
+        "sourcetype": "meraki:accesspoints",
+        "type": "wpa_auth",
+        "count": "50",
+        "device_count": "3",
+        "descriptions": "WPA authentication successful"
+      },
+      {
+        "networkId": "N_KL0000521",
+        "sourcetype": "meraki:securityappliances",
+        "type": "content_filtering",
+        "count": "10",
+        "device_count": "1",
+        "descriptions": "Content filtering event"
+      },
+      {
+        "networkId": "N_KL0000521",
+        "sourcetype": "meraki:securityappliances",
+        "type": "dhcp_lease",
+        "count": "10",
+        "device_count": "1",
+        "descriptions": "DHCP lease granted"
+      },
+      {
+        "networkId": "N_KL0000521",
+        "sourcetype": "meraki:securityappliances",
+        "type": "firewall_allow",
+        "count": "10",
+        "device_count": "1",
+        "descriptions": "Firewall rule allowed traffic"
+      },
+      {
+        "networkId": "N_KL0000521",
+        "sourcetype": "meraki:securityappliances",
+        "type": "vpn_registry_change",
+        "count": "10",
+        "device_count": "1",
+        "descriptions": "VPN connectivity change"
+      },
+      {
+        "networkId": "N_KL0000521",
+        "sourcetype": "meraki:switches",
+        "type": "poe_budget_change",
+        "count": "20",
+        "device_count": "2",
+        "descriptions": "PoE budget updated"
+      },
+      {
+        "networkId": "N_KL0000521",
+        "sourcetype": "meraki:switches",
+        "type": "port_status",
+        "count": "20",
+        "device_count": "2",
+        "descriptions": "Port status changed"
+      }
+    ],
+    "ise": [
+      {
+        "ise_event": "CISE_Passed_Authentications",
+        "device_name": "KL-047-AP",
+        "count": "37",
+        "unique_users": "4",
+        "nas_ips": [
+          "10.10.47.11",
+          "10.10.47.13"
+        ]
+      },
+      {
+        "ise_event": "CISE_Passed_Authentications",
+        "device_name": "KL-112-AP",
+        "count": "40",
+        "unique_users": "4",
+        "nas_ips": [
+          "10.10.112.11",
+          "10.10.112.13"
+        ]
+      },
+      {
+        "ise_event": "CISE_Passed_Authentications",
+        "device_name": "KL-237-AP",
+        "count": "40",
+        "unique_users": "4",
+        "nas_ips": [
+          "10.10.237.11",
+          "10.10.237.13"
+        ]
+      },
+      {
+        "ise_event": "CISE_Passed_Authentications",
+        "device_name": "KL-305-AP",
+        "count": "38",
+        "unique_users": "4",
+        "nas_ips": [
+          "10.10.50.11",
+          "10.10.50.13"
+        ]
+      },
+      {
+        "ise_event": "CISE_Passed_Authentications",
+        "device_name": "KL-418-AP",
+        "count": "40",
+        "unique_users": "4",
+        "nas_ips": [
+          "10.10.62.11",
+          "10.10.62.13"
+        ]
+      },
+      {
+        "ise_event": "CISE_Passed_Authentications",
+        "device_name": "KL-521-AP",
+        "count": "40",
+        "unique_users": "4",
+        "nas_ips": [
+          "10.10.21.11",
+          "10.10.21.13"
+        ]
+      }
+    ]
+  },
+  "drill_data": {
+    "305": {
+      "drill_meraki": [
+        {
+          "sourcetype": "meraki:accesspoints",
+          "type": "wpa_deauth",
+          "count": "36",
+          "device_count": "1",
+          "devices": "KL-305-SEA-AP-3",
+          "descriptions": "WPA deauthentication \u2014 client RSSI below threshold"
+        },
+        {
+          "sourcetype": "meraki:accesspoints",
+          "type": "wpa_auth",
+          "count": "18",
+          "device_count": "3",
+          "devices": [
+            "KL-305-SEA-AP-1",
+            "KL-305-SEA-AP-2",
+            "KL-305-SEA-AP-3"
+          ],
+          "descriptions": "WPA authentication successful"
+        },
+        {
+          "sourcetype": "meraki:accesspoints",
+          "type": "rf_change",
+          "count": "9",
+          "device_count": "1",
+          "devices": "KL-305-SEA-AP-1",
+          "descriptions": "RF environment changed"
+        },
+        {
+          "sourcetype": "meraki:switches",
+          "type": "port_status",
+          "count": "20",
+          "device_count": "2",
+          "devices": [
+            "KL-305-SEA-MS-1",
+            "KL-305-SEA-MS-2"
+          ],
+          "descriptions": "Port status changed"
+        }
+      ],
+      "drill_sdwan": [
+        {
+          "color": "SITE_SUMMARY",
+          "site_health": "good",
+          "bfd_up": "2",
+          "bfd_down": "0",
+          "reachability": "reachable"
+        },
+        {
+          "color": "mpls",
+          "tunnel_state": "up",
+          "jitter_ms": "4.6",
+          "latency_ms": "15.5",
+          "loss_pct": "0.3",
+          "vqoe": "7",
+          "event_count": "20"
+        }
+      ],
+      "drill_te": [
+        {
+          "sourcetype": "cisco:thousandeyes:alerts",
+          "alert_cleared": "true",
+          "severity": "NONE",
+          "avg_resp_ms": "50.7",
+          "isp_status": "healthy",
+          "edge_status": "healthy",
+          "conclusion": "All hops within threshold - no issues detected"
+        }
+      ],
+      "drill_ise": [
+        {
+          "ise_event": "CISE_Passed_Authentications",
+          "user": "guest_wifi",
+          "count": "38",
+          "nas_count": "2",
+          "nas_ips": [
+            "10.10.50.11",
+            "10.10.50.13"
+          ]
+        }
+      ],
+      "correlate_timeline": [
+        {
+          "_time": "2026-08-09T00:19:40",
+          "domain": "MERAKI",
+          "sourcetype": "meraki:accesspoints",
+          "detail": "wpa_deauth on KL-305-SEA-AP-3 | WPA deauthentication \u2014 client RSSI below threshold"
+        },
+        {
+          "_time": "2026-08-09T00:20:12",
+          "domain": "MERAKI",
+          "sourcetype": "meraki:accesspoints",
+          "detail": "wpa_deauth on KL-305-SEA-AP-3 | WPA deauthentication \u2014 client RSSI below threshold"
+        },
+        {
+          "_time": "2026-08-09T00:20:48",
+          "domain": "MERAKI",
+          "sourcetype": "meraki:accesspoints",
+          "detail": "wpa_auth on KL-305-SEA-AP-3 | WPA authentication successful"
+        },
+        {
+          "_time": "2026-08-09T00:21:20",
+          "domain": "MERAKI",
+          "sourcetype": "meraki:accesspoints",
+          "detail": "wpa_deauth on KL-305-SEA-AP-3 | WPA deauthentication \u2014 client RSSI below threshold"
+        },
+        {
+          "_time": "2026-08-09T00:21:55",
+          "domain": "MERAKI",
+          "sourcetype": "meraki:accesspoints",
+          "detail": "wpa_deauth on KL-305-SEA-AP-3 | WPA deauthentication \u2014 client RSSI below threshold"
+        }
+      ]
+    }
+  },
+  "reference": {
+    "detect_stores": [
+      "305"
+    ],
+    "severity": "P3 MEDIUM",
+    "dedup_decision": "send"
+  }
+}
