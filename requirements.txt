@@ -12,10 +12,17 @@ aiohttp>=3.9
 # which otel-api REMOVED after ~1.42 — a looser floor (>=1.38) lets pip resolve to
 # 1.44 (latest) and the GenAI util then fails to import → GenAI silently falls back
 # to off. 1.38.x still ships _events AND meets the Splunk AI Agent Monitoring floor.
-# 2026-08-10 FIX: pin opentelemetry-api EXPLICITLY. sdk==1.38.0 alone did NOT hold
-# it — api is a transitive dep, and a zip-rebuild ~2026-08-01 let it drift past 1.42
-# (where _events was removed) → the GenAI util failed to import → gen_ai metrics for
-# kl-triage flatlined on 2026-08-03 (AI Overview stopped populating). This pin locks it.
+# 2026-08-10: pin opentelemetry-api EXPLICITLY + exact-pin the util below. sdk==1.38.0
+# alone does not pin api hard enough to stop a transitive drift past 1.42 (where _events
+# was removed), which would make the GenAI util fail to import and genai.py silently fall
+# back to OFF. So this is defensible hygiene against a REAL future drift.
+#
+# CORRECTION (post-mortem, 2026-08-10): the drift was NOT what caused the 2026-08-03
+# AI-Overview outage. GenAI was emitting fine the whole time (confirmed live in linda
+# index=k8s_ws_metrics). The outage was the O11y ORG custom-MTS cap being FULL → throttled
+# MTS creation rejected the agent's gen_ai.* MTS on every pod roll (fixed collector-side:
+# cilium/hubble O11y-exclude + gen_ai per-pod-dim strip — see kl-governance values files).
+# So v1-0-89 did NOT fix the outage; these pins are kept purely as forward-looking hygiene.
 opentelemetry-api==1.38.0
 opentelemetry-sdk==1.38.0
 opentelemetry-exporter-otlp-proto-grpc==1.38.0
