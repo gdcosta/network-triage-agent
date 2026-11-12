@@ -27,5 +27,7 @@ data:
       "claude-opus-4-8": { "input": 15.0, "output": 75.0, "cache_read": 1.50, "cache_write": 18.75 },
 
       "gpt-4.1-mini": { "input": 0.40, "output": 1.60, "cache_read": 0.10, "cache_write": 0.0 },
-      "gpt-5.4-mini": { "input": 0.75, "output": 4.50, "cache_read": 0.075, "cache_write": 0.0 }
+      "gpt-5.4-mini": { "input": 0.75, "output": 4.50, "cache_read": 0.075, "cache_write": 0.0 },
+      "_comment_gpt54": "gpt-5.4 (bot, Phase 3b) rates below are an ESTIMATE — CONFIRM against the live OpenAI catalog before relying on cost (forward-only; linda is repriceable).",
+      "gpt-5.4": { "input": 2.50, "output": 10.0, "cache_read": 0.25, "cache_write": 0.0 }
     }

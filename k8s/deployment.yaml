@@ -137,14 +137,15 @@ spec:
             - name: VLLM_MERAKI_COMPACT_SCAN
               value: "false"
             # Fan-out concurrency cap for the vLLM triage path (provider-conditional;
-            # frontier keeps the single all-stores call). Raised 4->5 on 2026-08-08
-            # after VLLM_MERAKI_COMPACT_SCAN lowered per-request context — an
-            # experiment to see if cap 5 is now REAL parallelism vs the earlier
-            # preemption cliff (cap 5 @ ~20K/call crossed it: preempt 0.067/s @99.2%).
-            # Watch peak KV + preemptions under a >=5-fault storm; revert to 4 if it
-            # preempts. Pinned here so a manifest re-apply won't reset to default (2).
+            # frontier keeps the single all-stores call). Was raised 4->5 on 2026-08-08
+            # as an experiment (after VLLM_MERAKI_COMPACT_SCAN lowered per-request
+            # context) to see if cap 5 is REAL parallelism vs the earlier preemption
+            # cliff (cap 5 @ ~20K/call crossed it: preempt 0.067/s @99.2%). The
+            # compact scan was then found to blind flap detection and turned OFF, so
+            # the cap is back at 4 — LIVE value since ~2026-08-10, repo realigned
+            # 2026-11-12. Pinned here so a manifest re-apply won't reset to default (2).
             - name: VLLM_TRIAGE_MAX_CONCURRENCY
-              value: "5"
+              value: "4"
             # Hosted OpenAI (LLM_PROVIDER=openai). The model to serve; routed through
             # the SAME DC proxy loopback the anthropic path uses (:4000) via its
             # /v1/chat/completions handler — governed AND span-emitting. OPENAI_API_KEY
